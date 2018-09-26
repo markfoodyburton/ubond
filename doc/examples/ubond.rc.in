@@ -1,0 +1,13 @@
+#!/bin/sh
+#
+# $OpenBSD: ubond.rc,v 1.1.1.1 2015/10/23 09:28:58 sthen Exp $
+
+daemon="/usr/local/sbin/ubond"
+daemon_flags="-c /etc/ubond/ubond.conf --user _ubond"
+
+. /etc/rc.d/rc.subr
+
+pexp="ubond: .*priv.*"
+rc_bg=YES
+
+rc_cmd $1

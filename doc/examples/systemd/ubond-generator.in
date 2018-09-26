@@ -1,0 +1,39 @@
+#!/bin/sh
+
+# This systemd generator creates dependency symlinks that make all UBOND
+# tunnels listed in /etc/default/ubond's AUTOSTART be started/stopped/reloaded
+# when ubond.service is started/stopped/reloaded.
+
+set -eu
+
+GENDIR="$1"
+WANTDIR="$1/ubond.service.wants"
+SERVICEFILE="/lib/systemd/system/ubond@.service"
+AUTOSTART="all"
+CONFIG_DIR=@sysconfdir@/ubond
+
+mkdir -p "$WANTDIR"
+
+if test -e @sysconfdir@/default/ubond ; then
+    . @sysconfdir@/default/ubond
+fi
+
+# No VPNs automatically started
+if test "x$AUTOSTART" = "xnone" ; then
+    exit 0
+fi
+
+if test "x$AUTOSTART" = "xall" -o -z "$AUTOSTART" ; then
+    for CONFIG in `cd $CONFIG_DIR; ls *.conf 2> /dev/null`; do
+        NAME=${CONFIG%%.conf}
+        ln -s "$SERVICEFILE" "$WANTDIR/ubond@$NAME.service"
+    done
+else
+    for NAME in $AUTOSTART ; do
+        if test -e $CONFIG_DIR/$NAME.conf ; then
+            ln -s "$SERVICEFILE" "$WANTDIR/ubond@$NAME.service"
+        fi
+    done
+fi
+
+exit 0

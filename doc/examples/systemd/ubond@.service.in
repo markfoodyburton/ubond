@@ -1,0 +1,17 @@
+[Unit]
+Description=UBOND connection to %i
+PartOf=ubond.service
+ReloadPropagatedFrom=ubond.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=@sbindir@/ubond --config @sysconfdir@/ubond/%i.conf --user ubond
+ExecReload=/bin/kill -HUP $MAINPID
+WorkingDirectory=@sysconfdir@/ubond
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+
+

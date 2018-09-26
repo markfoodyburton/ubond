@@ -1,0 +1,6 @@
+*.o
+*.log
+ubond
+.*.swp
+Makefile.in
+.deps

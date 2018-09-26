@@ -1,0 +1,174 @@
+ubond.conf(5) -- UBOND configuration
+====================================
+
+## DESCRIPTION
+
+ubond(1) configuration file
+
+## SYNTAX
+
+ubond.conf(5) is a "ini style" config file.
+settings are stored within sections, surrounded by [].
+Comments can be inserted anywhere, starting with **#**.
+Keys / values are plain ascii separated by "=".
+Strings should be escaped using double quotes '"'
+
+
+### GENERAL
+
+The **[general]** section is reserved for global configuration.
+
+  - _statuscommand_ = "/path/to/secure.script.sh"
+
+    **MANDATORY**
+
+    statuscommand path is called with two parameters when a status changed
+    within **ubond**. First argument is the interface name. Second argument
+    is the status name that changed.
+      - tuntap_up: at least one tunnel is up and running
+      - tuntap_down: all tunnels are down
+      - rtun_up: one tunnel changed status to up ($3 is the tunnel name)
+      - rtun_down: one tunnel changed status to down ($3 is the tunnel name)
+
+    See the example file _ubond_updown.sh_ for more information
+
+  - _mode_ = "server"
+
+    **MANDATORY**
+
+    - "server": listens on _bind_address_, _bind_port_ for every tunnel
+    - "client": connects to _remote_address_, _remote_port_ for every
+      tunnel
+
+  - _timeout_ = 30
+    Timeout, expressed in seconds.
+
+    Triggered when the other side does not responds to keepalive packets.
+    Keepalive are sent every timeout/2 seconds.
+
+  - _interface_name_ = "ubond0"
+    Set interface name to the specified value. (**LINUX ONLY**)
+
+  - _tuntap_ = "tun"
+    Tells ubond whether to create a tun (layer 3) or tap (layer 2) interface.
+
+  - _password_
+
+    **MANDATORY**
+
+    The password string is used to generate a key used by libsodium.
+    Password is mandatory and must be the same on the client and on the server.
+
+  - _cleartext_data_
+    If set to 1, data packets will **NOT** be encrypted.
+
+    Use with caution.
+
+  - _control_unix_path_ = ""
+    Path to the unix socket for remote control.
+
+  - _control_bind_host_ = ""
+    Bind address of the remote control. (HTTP)
+    (url: http://[control_bind_host]:[control_bind_port]/status)
+
+  - _control_bind_port_ = ""
+    Bind port of the remote control. (HTTP)
+
+  - _reorder_buffer_size_ = 0
+    ubond includes a reordering algorithm for its aggregation.
+    This variable defines how many packets can be held in case one end
+    of the tunnel does receive data ouf of order.
+
+    Experiment to know what value is best for you. Good starting point
+    can be as small as 64 packets.
+
+    **0** disables the reordering.
+
+  - _loss_tolerence_ = 0
+    ubond monitors packet loss on every link. If the packet loss
+    ratio on a link exceeds the specified value in percent,
+    the link changes state to UBOND_LOSSY and is removed from aggregation.
+
+    Lossy links ARE used anyway if no other choices are available (if all links
+    are lossy)
+
+    **100 or more** disables the loss tolerence system.
+
+
+### TUNNELS
+Each tunnel must be declared in its own section.
+
+The section name is mapped to the tunnel name. Example: "[adsl1]", "[adsl2]".
+
+  - _bindhost_ = "0.0.0.0"
+    Bind on a specific address. (IPv4 only) (client/server)
+
+  - _bindport_ = 5080
+    Bind on a specific port. (client/server)
+
+  - _bindfib_ = 0
+    Select the fib (FreeBSD/OpenBSD only) to use. Avoid to configure source-
+    routing on clients
+
+  - _remotehost_ = "1.2.3.4"
+    Address of the remote host. (client)
+
+  - _remoteport_ = 5080
+    Port of the remote host. (client)
+
+  - _bandwidth_upload_ = 61440
+    Maximum upload bandwidth, in bytes, for this link.
+
+    Bandwidth is specified in Bytes (1 KiB is 1024 Bytes).
+
+    This is used to setup the weighted round-robin balancing algorithm.
+    Set 0 if both links are similar. (client/server)
+
+  - _timeout_ = 25
+    Override **[general]** timeout for this link. (client/server)
+
+  - _fallback_only_ = 0
+    Links defined with fallback_only will be connected at all times,
+    but will only be used if all other tunnels are down. (client)
+
+### FILTERS
+
+**[filters]** section associate a bpf(4) filter to a specific interface.
+Filters are used when aggregation is used but you want to pass some traffic
+specifically through only one interface, without re-ordering. (Like for using VoIP)
+
+Example filters:
+
+`[filters]`
+
+`sdsl = udp port 5060`
+
+`adsl = udp port 5060`
+
+## RELOADING
+
+The configuration can be reloaded at any moment by sending SIGHUP to the child
+ubond process.
+
+## REORDERING
+
+The reorder buffer will be sent "as is" on the network if the buffer
+can't be reconstructed in time, ie: packet loss. (SRTT * 2)
+
+## STATUS
+
+UBOND status can be monitored using ps(1). ubond prints its --name, then the status of each tunnel prefixed by the status.
+
+Status availables: **!**: down, **@**: up, **~**: lossy
+
+Example: `ubond: adsl3g !3g @adsl ~wifi`
+
+3g is **down**, adsl is **up** and wifi is **lossy** (up, but above loss_tolerence threshold).
+
+## EXAMPLE
+
+See examples/ubond.conf
+
+## SEE ALSO
+
+ubond(1)

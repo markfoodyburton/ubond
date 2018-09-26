@@ -1,0 +1,22 @@
+initial configuration
+---------------------
+Copy on example configuration file from /usr/share/doc/ubond/examples/ to /etc/ubond/xxx.conf
+Make sure the configuration file is NOT readable by anyone other than root: chmod 0600 /etc/ubond/*.conf
+
+multiple configurations in parallel
+-----------------------------------
+When ubond is started by /etc/init.d/ubond or ubond.service,
+the configuration file /etc/default/ubond is read and, all tunnels
+defined in AUTOSTART will be started/restarted/...
+
+systemd
+-------
+
+If using systemd, then you can start/stop using:
+  service ubond@xxx start
+
+  or
+
+  systemctl start ubond@xxx
+
+  where xxx is the name of your configuration file in /etc/ubond, without the ".conf" extension.
