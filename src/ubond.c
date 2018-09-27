@@ -528,7 +528,7 @@ int ubond_loss_pack(ubond_tunnel_t *t)
 {
   double lt=(float)t->loss_tolerence;
   // loss_cnt is out of 64, we want it out of lt/2
-  double ploss=((t->loss_cnt*100.0/64.0) + t->loss_av)/2;
+  double ploss=(((float)t->loss_cnt*100.0/(64.0-(float)t->reorder_length)) + t->loss_av)/2.0;
   // 50:50 current loss, and average loss as a %
   // or should we say current loss from 0-lt + average loss...?
 
@@ -618,9 +618,8 @@ ubond_protocol_read(ubond_tunnel_t *tun, ubond_pkt_t *pkt)
     if (proto->timestamp_reply != (uint16_t)-1) {
         uint16_t now16 = ubond_timestamp16(now64);
         double R = ubond_timestamp16_diff(now16, proto->timestamp_reply);
-        if ((R < 5000)/* && (tun->seq_vect==(uint64_t)-1)*/) {  /* ignore large values, e.g. server
-                                                                       * was Ctrl-Zed, and while there
-                                                                       * are losses, the values will be wrong! */
+        if ((R < 5000) /*&& R<tun->srtt*2*/) {  /* ignore large values, or
+                                             * reordered packets */
             if (tun->rtt_hit<10) { /* first measurement */
               tun->srtt = R;
               tun->rttvar = 0;//R / 2;
@@ -994,7 +993,10 @@ ubond_rtun_new(const char *name,
     new->bandwidth_measured=0;
     new->bm_data=0;
     new->fallback_only = fallback_only;
-    new->loss_tolerence = loss_tolerence;
+    new->loss_tolerence = 31;//loss_tolerence;
+#if 0
+    clean up loss tolerence
+#endif
     if (bindaddr)
         strlcpy(new->bindaddr, bindaddr, sizeof(new->bindaddr));
     if (bindport)
