@@ -6,7 +6,7 @@ ReloadPropagatedFrom=ubond.service
 [Service]
 Type=notify
 NotifyAccess=main
-ExecStart=@sbindir@/ubond --config @sysconfdir@/ubond/%i.conf --user ubond
+ExecStart=@sbindir@/ubond --config @sysconfdir@/ubond/%i.conf --name %i --user ubond
 ExecReload=/bin/kill -HUP $MAINPID
 WorkingDirectory=@sysconfdir@/ubond
 Restart=on-failure

@@ -4,6 +4,7 @@
  *   Copyright(c) 2010-2014 Intel Corporation. All rights reserved.
  *   All rights reserved.
  *   Adapted for ubond by Laurent Coustet (c) 2015
+ *   Re-worked by Mark Burton (c) 2018 All Rights Reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions

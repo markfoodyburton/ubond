@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2018, Mark Burton <mark@helenandmark.org>
  * Copyright (c) 2015, Laurent COUSTET <ed@zehome.com>
  *
  * All rights reserved.
@@ -527,8 +528,11 @@ int ubond_loss_pack(ubond_tunnel_t *t)
 {
   double lt=(float)t->loss_tolerence;
   // loss_cnt is out of 64, we want it out of lt/2
-  double ploss=(t->loss_cnt*(lt/128.0)) + t->loss_av;
-  
+  double ploss=((t->loss_cnt*100.0/64.0) + t->loss_av)/2;
+  // 50:50 current loss, and average loss as a %
+  // or should we say current loss from 0-lt + average loss...?
+
+  // cut off at the loss tolerence
   if (ploss >= lt) return 31;
   int v=(int)(((ploss * 31.0)+(lt/2.0)-0.5) / lt);
   return v;
@@ -546,7 +550,7 @@ ubond_protocol_read(ubond_tunnel_t *tun, ubond_pkt_t *pkt)
     unsigned char nonce[crypto_NONCEBYTES];
     int ret;
     uint16_t rlen;
-    uint64_t now64 = ubond_timestamp64(ev_time()/*ev_now(EV_DEFAULT_UC)*/);
+    uint64_t now64 = ubond_timestamp64(ev_now(EV_DEFAULT_UC));
 
     tun->pkts_cnt++;
 
@@ -629,7 +633,7 @@ ubond_protocol_read(ubond_tunnel_t *tun, ubond_pkt_t *pkt)
                 const double beta = 1.0 / 4.0;
                 tun->rttvar = (1 - beta) * tun->rttvar + (beta * fabs(tun->srtt - R));
                 tun->srtt = (1 - alpha) * tun->srtt + (alpha * R);
-                tun->srtt_av_d+=R + (4*tun->rttvar);
+                tun->srtt_av_d+=R;// + (4*tun->rttvar);
                 tun->srtt_av_c++;
                 tun->srtt_raw=R;
 //              } else {
@@ -732,16 +736,18 @@ ubond_rtun_send(ubond_tunnel_t *tun, ubond_pkt_t *pkt)
       if (now64 - tun->saved_timestamp_received_at < 1000 ) {
         /* send "corrected" timestamp advanced by how long we held it */
         /* Cast to uint16_t there intentional */
-        proto->timestamp_reply = tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at);
+        proto->timestamp_reply = ubond_timestamp16(tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at));
         tun->saved_timestamp = -1;
         tun->saved_timestamp_received_at = 0;
       } else {
         proto->timestamp_reply = -1;
+        tun->saved_timestamp = -1;
+        tun->saved_timestamp_received_at = 0;
         log_debug("rtt","(%s) No timestamp added, time too long! (%lu > 1000)",tun->name, tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at ));
       }
     } else {
       proto->timestamp_reply = -1;
-      log_debug("rtt","(%s) No timestamp added, time too long! (%lu > 1000)",tun->name, tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at ));
+//      log_debug("rtt","(%s) No timestamp available!",tun->name);
     }
 
     proto->timestamp = ubond_timestamp16(now64);
@@ -1413,11 +1419,14 @@ ubond_rtun_status_up(ubond_tunnel_t *t)
     t->last_activity = now;
     t->last_keepalive_ack = now;
     t->last_keepalive_ack_sent = now;
+    t->saved_timestamp = -1;
+    t->saved_timestamp_received_at = 0;
     t->srtt_av=40;
     t->srtt_av_d=0;
     t->srtt_av_c=0;
     t->loss_av=0;
     t->loss_cnt=0;
+    t->rtt_hit=0;
     t->bm_data=0;
 //    ubond_pktbuffer_reset(t->sbuf);
 //    ubond_pktbuffer_reset(t->hpsbuf);
@@ -1458,6 +1467,9 @@ ubond_rtun_status_down(ubond_tunnel_t *t)
     t->srtt_raw=0;
     t->loss_av=100;
     t->loss_cnt=100;
+    t->saved_timestamp = -1;
+    t->saved_timestamp_received_at = 0;
+    t->rtt_hit=0;
 
     ubond_tunnel_t *tun;
     LIST_FOREACH(tun, &rtuns, entries) {
@@ -1768,11 +1780,12 @@ void ubond_calc_bandwidth(EV_P_ ev_timer *w, int revents)
         if (t->srtt_av > srtt_max) {
           srtt_max=t->srtt_av;
         }
+              // reset so if we get no traffic, we still see a valid srtt
+        t->srtt_av_d=0;//t->srtt_raw + (4*t->rttvar);
+        t->srtt_av_c=0;//1;
+
       }
       
-      // reset so if we get no traffic, we still see a valid srtt
-      t->srtt_av_d=0;//t->srtt_raw + (4*t->rttvar);
-      t->srtt_av_c=0;//1;
       new_srtt_av+=t->srtt_av;
       
       // calc measured bandwidth
@@ -2037,7 +2050,7 @@ ubond_rtun_check_lossy(ubond_tunnel_t *tun)
   double loss = tun->sent_loss;
   int status_changed = 0;
   ev_tstamp now = ev_now(EV_DEFAULT_UC);
-  int keepalive_ok= ((tun->last_keepalive_ack != 0) || (tun->last_keepalive_ack + UBOND_IO_TIMEOUT_DEFAULT*2 + ((tun->srtt_av/1000.0)*2)) > now);
+  int keepalive_ok= ((tun->last_keepalive_ack != 0) || (tun->last_keepalive_ack + UBOND_IO_TIMEOUT_DEFAULT/**2 + ((tun->srtt_av/1000.0)*2)*/) > now);
 
   if (!keepalive_ok && tun->status == UBOND_AUTHOK) {
     log_info("rtt", "%s keepalive reached threashold, keepalive recieved %fs ago", tun->name, now-tun->last_keepalive_ack);
@@ -2061,6 +2074,7 @@ ubond_rtun_check_lossy(ubond_tunnel_t *tun)
   }
   /* are all links in lossy mode ? switch to fallback ? */
   if (status_changed) {
+    update_process_title();
     ubond_tunnel_t *t;
     ubond_rtun_recalc_weight();
     LIST_FOREACH(t, &rtuns, entries) {

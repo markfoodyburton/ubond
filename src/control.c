@@ -444,7 +444,7 @@ void ubond_control_write_status(struct ubond_control *ctrl)
                        t->sentbytes,
                        t->recvbytes,
                        t->bandwidth_max,
-                       t->srtt_av,
+                       t->srtt_raw,
                        t->loss_av,
                        t->sent_loss,
                        t->reorder_length_max,
