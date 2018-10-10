@@ -175,7 +175,13 @@ void ubond_reorder_tick(EV_P_ ev_timer *w, int revents)
   if (diff) {
 //    9/10 is too long, but 0 is too short?
 //      shorter tick, and 4/5 seems to be about right
-    b->pkts_per_sec=((b->pkts_per_sec *4.0)+((float)b->pkts_arrived/diff))/5.0;
+    double pps=((float)b->pkts_arrived/(float)diff);
+    if (pps>b->pkts_per_sec) {
+      b->pkts_per_sec=(pps+(pps - b->pkts_per_sec))*2;
+    } else {
+      b->pkts_per_sec=((b->pkts_per_sec *4.0)+pps)/5.0;
+    }
+
 //  b->pkts_per_sec=((float)b->pkts_arrived/diff);
 /*      
     ev_tstamp av=((b->diff / (float)b->arrived)/2.0);
@@ -191,8 +197,10 @@ void ubond_reorder_tick(EV_P_ ev_timer *w, int revents)
   }
   b->pkts_sent=0;
   b->pkts_arrived=0;
-  if (b->pkts_per_sec < 100) b->pkts_per_sec=100;
-  
+  if (b->pkts_per_sec < 1000) b->pkts_per_sec=1000;
+  // this seems to be critical for video?
+  // Too high, it fails, too low it fails...???
+
 //  log_debug("reorder", "adjusting reordering drain timeout to %.0fms", reorder_drain_timeout.repeat*1000 );
 }
 
@@ -263,6 +271,18 @@ void ubond_reorder_insert(ubond_tunnel_t *tun, ubond_pkt_t *pkt)
 // we could count in each tunnel the number of non resends, if you get to
 // 'reorder' in each tunnel, you know you wont receive anymore resends    
     if (out_resends>0) out_resends--;
+  }
+
+  if (!b->enabled || !pkt->p.reorder || !pkt->p.data_seq/* || pkt->p.data_seq==b->min_seqn*/)
+  {
+    ubond_rtun_inject_tuntap(pkt); // this will deliver and free the packet
+    // Deliver non reordable packets ASAP, as that shoudn't effect a tcp algorithm
+    b->delivered++;
+    return;
+  }
+
+  if (pkt->p.type == UBOND_PKT_DATA_RESEND/* && pkt->p.data_seq && pkt->p.reorder*/) {
+
     if (aolderb(pkt->p.data_seq, b->min_seqn)) {
       log_debug("resend","Rejecting (un-necissary ?) resend %lu",pkt->p.data_seq);
       ubond_pkt_release(pkt);
@@ -270,19 +290,14 @@ void ubond_reorder_insert(ubond_tunnel_t *tun, ubond_pkt_t *pkt)
     } else {
       log_debug("resend","Injecting resent %lu",pkt->p.data_seq);
     }
-  } else if (!b->enabled || !pkt->p.reorder || !pkt->p.data_seq || pkt->p.data_seq==b->min_seqn)
-    // if this is a resend, it may  not be marked as reorderable, so we
-    // must skip fast delivery
-  {
-    if (pkt->p.data_seq==b->min_seqn) {
-      log_debug("reorder", "Inject TCP packet Just In Time (seqn %lu)", pkt->p.data_seq);
-      b->min_seqn = pkt->p.data_seq+1;
-    }
+  } /* dont do a fast path, otherwise the buffer drains too quick
+       else if (pkt->p.data_seq==b->min_seqn) {
+    log_debug("reorder", "Inject TCP packet Just In Time (seqn %lu)", pkt->p.data_seq);
+    b->min_seqn = pkt->p.data_seq+1;
     ubond_rtun_inject_tuntap(pkt); // this will deliver and free the packet
     b->delivered++;
     return;
-  }
-
+    }*/
 
   if (aolderb(pkt->p.data_seq, b->min_seqn)) {
     log_debug("loss", "got old insert %d behind (probably agressive pruning) on %s",(int)(b->min_seqn - pkt->p.data_seq), tun->name);
@@ -327,6 +342,7 @@ void ubond_reorder_insert(ubond_tunnel_t *tun, ubond_pkt_t *pkt)
   if (!ev_is_active(&b->reorder_drain_check)) {
     ev_check_start(EV_A_ &b->reorder_drain_check);
   }
+//  ubond_reorder_drain();
 }
 
 extern double srtt_min;

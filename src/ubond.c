@@ -872,7 +872,7 @@ ubond_rtun_do_send(ubond_tunnel_t *tun)
 //      ev_idle_start(EV_A_ &tun->idle_ev);
     }
   }
-  
+
   if (len>0) {
     // len + the UDP  overhead ??
     tun->bytes_since_adjust+=len+ IP4_UDP_OVERHEAD;
@@ -885,7 +885,6 @@ ubond_rtun_do_send(ubond_tunnel_t *tun)
       ev_io_stop(EV_A_ &tun->io_write);
     }
   }
-  
 }
 static void
 ubond_rtun_write(EV_P_ ev_io *w, int revents)
@@ -893,9 +892,8 @@ ubond_rtun_write(EV_P_ ev_io *w, int revents)
   ubond_tunnel_t *tun = w->data;
   if (tun->busy_writing) {
     tun->busy_writing--;
-    ubond_rtun_do_send(tun);
   }
-  
+  ubond_rtun_do_send(tun);
 }
 
 static void
@@ -1090,7 +1088,7 @@ ubond_rtun_recalc_weight()
   // reset all tunnels
   double total=0;
   LIST_FOREACH(t, &rtuns, entries) {
-    if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*BANDWIDTHCALCTIME)) && (t->status == UBOND_AUTHOK)) {
+    if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*BANDWIDTHCALCTIME)) && (t->status == UBOND_AUTHOK) && ubond_status.fallback_mode==t->fallback_only ) {
       t->weight= bwneeded/50;
       total+=t->bandwidth_max;
     } else {
@@ -1102,7 +1100,8 @@ ubond_rtun_recalc_weight()
   }
 
   LIST_FOREACH(t, &rtuns, entries) {
-    if (t->status == UBOND_AUTHOK) {
+    if (t->status == UBOND_AUTHOK && ubond_status.fallback_mode==t->fallback_only)
+    {
       if ((t->quota == 0) || (t->permitted > (t->bandwidth_max*128*BANDWIDTHCALCTIME))) {
 
         double part=1;
@@ -1125,9 +1124,17 @@ ubond_rtun_recalc_weight()
             t->weight= (bw);
             bwavailable+=bw;
           } else {
-            t->weight= (t->bandwidth_max*part);
-            bwavailable+=(t->bandwidth_max*part);
-            bwneeded+=(t->bandwidth_max*(1-part)); // compensate for losses!
+            if (part==1 || t->bandwidth*part < bw) // we're in great shape, let loose
+            {
+              t->weight= (t->bandwidth_max*part);
+              bwavailable+=(t->bandwidth_max*part);
+              bwneeded+=(t->bandwidth_max*(1-part)); // compensate for losses!
+            } else {
+              // just take what we need
+                t->weight= (bw*part);
+                bwavailable+=(bw*part);
+                bwneeded+=(bw*(1-part)); // compensate for losses!
+            }
           }
         }
       }
@@ -1172,9 +1179,6 @@ ubond_rtun_recalc_weight()
 //    t->send_timer.repeat = 1.0 / (((t->weight/8.0) * 1000.0)/mtu_av);
 //  printf("Tun %s has loss %f => weight %f bbs %f (%f)\n",t->name, t->sent_loss, t->weight, t->bytes_per_sec, t->bytes_per_sec/128.0);
   }
-
-
-
 }
 
 static int
@@ -1664,7 +1668,7 @@ ubond_rtun_resend(struct resend_data *d)
     ubond_pkt_t *old_pkt=loss_tun->old_pkts[seqn % RESENDBUFSIZE];
     if (old_pkt && old_pkt->p.tun_seq==seqn) {
 //      set_reorder(old_pkt);
-      if (old_pkt->p.type!=UBOND_PKT_DATA || old_pkt->p.reorder) { // only send tcp, e.g. refuse UDP packets!
+  //if (old_pkt->p.type!=UBOND_PKT_DATA || old_pkt->p.reorder || old_pkt->p.data[9]==17) { // only send tcp, e.g. refuse UDP packets!
         ubond_buffer_write(&hpsend_buffer,old_pkt);
         loss_tun->old_pkts[seqn % RESENDBUFSIZE]=NULL; // remove this from the old list
         if (old_pkt->p.type==UBOND_PKT_DATA) old_pkt->p.type=UBOND_PKT_DATA_RESEND;
@@ -1681,9 +1685,9 @@ ubond_rtun_resend(struct resend_data *d)
         } else {
           log_debug("resend", "No suitable tunnel, unable to resend (tun seq: %lu data seq %lu)",seqn, old_pkt->p.data_seq);
           }*/
-      } else {
+/*      } else {
         log_debug("resend", "Wont resent packet (tun seq: %lu data seq %lu) of type %d", seqn, old_pkt->p.data_seq, (unsigned char)old_pkt->p.data[6]);
-      }
+        }*/
     } else {
       if (old_pkt) {
         log_debug("resend", "unable to resend seq %lu (Not Found - replaced by %lu)",seqn, old_pkt->p.tun_seq);
@@ -2139,9 +2143,9 @@ tuntap_io_event(EV_P_ ev_io *w, int revents)
         ubond_pkt_t *pkt=UBOND_TAILQ_POP_LAST(&tuntap.sbuf);
         ubond_tuntap_write(&tuntap, pkt);
         /* Nothing else to read */
-        if (UBOND_TAILQ_EMPTY(&tuntap.sbuf)) {
-          ev_io_stop(EV_A_ &tuntap.io_write);
-        }
+      }
+      if (UBOND_TAILQ_EMPTY(&tuntap.sbuf)) {
+        ev_io_stop(EV_A_ &tuntap.io_write);
       }
     }
 }
