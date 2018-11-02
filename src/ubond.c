@@ -296,6 +296,18 @@ void preset_permitted(int argc, char **argv)
         }
     }
 }
+static void
+ubond_reset_perm(EV_P_ ev_signal *w, int revents)
+{
+  ubond_tunnel_t *t;
+  LIST_FOREACH(t, &rtuns, entries) {
+    if (t->quota) {
+      log_info("quota", "%s quota reset to 0\n", t->name);
+      t->permitted=0;
+    }
+  }
+}
+
 
 int
 ubond_sock_set_nonblocking(int fd)
@@ -504,7 +516,7 @@ ubond_rtun_read(EV_P_ ev_io *w, int revents)
         } else if (pkt->p.type == UBOND_PKT_AUTH ||
                 pkt->p.type == UBOND_PKT_AUTH_OK) {
           // recieve any quota info, if there is any
-          if (pkt->p.len > 2) {
+          if (pkt->p.len > 2 && tun->quota) {
             int64_t perm=0;
             sscanf(&(pkt->p.data[2]),"%ld", &perm);
             if (perm > tun->permitted) tun->permitted=perm;
@@ -2243,7 +2255,7 @@ main(int argc, char **argv)
 {
     int i, c, option_index, config_fd;
     struct stat st;
-    ev_signal signal_hup;
+    ev_signal signal_hup, signal_usr1;
     ev_signal signal_sigquit, signal_sigint, signal_sigterm;
     extern char *__progname;
 #ifdef ENABLE_CONTROL
@@ -2459,10 +2471,12 @@ main(int argc, char **argv)
         fatalx("Privileged process died");
 
     ev_signal_init(&signal_hup, ubond_config_reload, SIGHUP);
+    ev_signal_init(&signal_usr1, ubond_reset_perm, SIGUSR1);
     ev_signal_init(&signal_sigint, ubond_quit, SIGINT);
     ev_signal_init(&signal_sigquit, ubond_quit, SIGQUIT);
     ev_signal_init(&signal_sigterm, ubond_quit, SIGTERM);
     ev_signal_start(loop, &signal_hup);
+    ev_signal_start(loop, &signal_usr1);
     ev_signal_start(loop, &signal_sigint);
     ev_signal_start(loop, &signal_sigquit);
     ev_signal_start(loop, &signal_sigterm);
