@@ -704,6 +704,9 @@ ubond_rtun_send(ubond_tunnel_t *tun, ubond_pkt_t *pkt)
 // tun seq incrememts even if we resend
     proto->tun_seq = tun->seq;
 
+    tun->seq++; // ALL packets are stored in the resend old_pkts buffer, even if
+                // they fail to send.
+
     proto->flow_id = tun->flow_id;
     proto->version = UBOND_PROTOCOL_VERSION;
     proto->sent_loss=ubond_loss_pack(tun);
@@ -783,16 +786,18 @@ ubond_rtun_send(ubond_tunnel_t *tun, ubond_pkt_t *pkt)
     {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
           if (pkt->p.type!=UBOND_PKT_AUTH) {
-            log_warn("net", "%s write error", tun->name);
+            log_warnx("net", "%s write error", tun->name);
             ubond_rtun_status_down(tun);
           } // dont report AUTH packet loss, as we know that !
         } else {
-          fatalx("lost write!");
+          // we should never attempt a send on a blockable tunnel, so we should
+          // nevr get here...
+          log_warnx("net", "%s lost write!", tun->name);
+          ubond_rtun_status_down(tun);
         }
     } else {
       // we are here when we succeed to send the packet
       
-      tun->seq++;
       if (pkt->p.type!=UBOND_PKT_DATA_RESEND) {
         if (pkt->p.reorder) data_seq++;
       }
@@ -858,19 +863,11 @@ ubond_rtun_do_send(ubond_tunnel_t *tun)
     if (! UBOND_TAILQ_EMPTY(&tun->hpsbuf)) {
       ubond_pkt_t *pkt=UBOND_TAILQ_POP_LAST(&tun->hpsbuf);
       len = ubond_rtun_send(tun, pkt);
-      if (len<0) {
-        log_warnx("net", "Failed to send on tunnel %s", tun->name);
-        UBOND_TAILQ_INSERT_TAIL(&tun->hpsbuf,pkt);
-      }
     } else {
       ubond_rtun_choose(tun);//EV_P_ ev_timer *w, int revents);  
       if (! UBOND_TAILQ_EMPTY(&tun->sbuf)) {
         ubond_pkt_t *pkt=UBOND_TAILQ_POP_LAST(&tun->sbuf);
         len = ubond_rtun_send(tun, pkt);
-        if (len<0) {
-          log_warnx("net", "Failed to send on tunnel %s", tun->name);
-          UBOND_TAILQ_INSERT_TAIL(&tun->sbuf,pkt);
-        }
       }
     }
     if (ev_is_active(&tun->check_ev)) {
@@ -1120,10 +1117,14 @@ ubond_rtun_recalc_weight()
         if (t->sent_loss>=((double)t->loss_tolerence/6.0)) {
           double lt=(double)t->loss_tolerence / 3.0;
           part = ((lt-(double)t->sent_loss)/lt);
-          if (part<=0.1) part=0.1;
+          if (part<=0.2) part=0.2;
         }
-        if (t->srtt_av > t->srtt_min*3) {
-          part *=(t->srtt_min*3)/t->srtt_av;
+        // 0 is too little - 3 is too much!
+        // NB, this doesn't really 'slow' traffic on the poor link, that will
+        // slow anyway - this sets up so that other links will get more!
+        if (t->srtt_av > t->srtt_min*2) {
+          part *=(t->srtt_min*2)/t->srtt_av;
+          if (part<=0.2) part=0.2;
         }
 //        if (part < 0.5) part=0.5; // the bandwidth call should kick in!
 //      part=1;
@@ -1133,7 +1134,7 @@ ubond_rtun_recalc_weight()
         double bw=bwneeded - bwavailable;
         if (bw>0) {
           if (t->quota!=0 && t->bandwidth_max*part > bw) {
-            t->weight= (bw);
+            t->weight= (bw);  // let the quota link soak it up
             bwavailable+=bw;
           } else {
             if (part==1 || t->bandwidth*part < bw) // we're in great shape, let loose
@@ -1410,21 +1411,6 @@ ubond_free_script_env(char **env)
     free(env);
 }
 
-#if 0
-ubond_tunnel_t *best_quick_tun(ubond_tunnel_t *not)
-{
-  ubond_tunnel_t *t, *best=NULL;
-  LIST_FOREACH(t, &rtuns, entries) {
-    if (t->status == UBOND_AUTHOK &&
-        t!=not &&
-//        t->sent_loss==0 &&
-        t->sent_loss<(double)t->loss_tolerence/4.0 &&
-        (!best || UBOND_TAILQ_LENGTH(&t->hpsbuf) < UBOND_TAILQ_LENGTH(&best->hpsbuf)))
-      best=t;
-  }
-  return best;
-}
-#endif
 static void
 ubond_rtun_status_up(ubond_tunnel_t *t)
 {
@@ -1674,13 +1660,19 @@ ubond_rtun_resend(struct resend_data *d)
 {
   ubond_tunnel_t *loss_tun=ubond_find_tun(d->tun_id);
   if (!loss_tun) return;
+  if (d->len > RESENDBUFSIZE/4) {
+    if (loss_tun->status>=UBOND_AUTHOK) {
+      loss_tun->status=UBOND_LOSSY;
+      loss_tun->sent_loss = 100.0;//tun->loss_tollerence
+    }
+  }
   
   for (int i=0; i<d->len;i++) {
     uint64_t seqn=d->seqn+i;
     ubond_pkt_t *old_pkt=loss_tun->old_pkts[seqn % RESENDBUFSIZE];
     if (old_pkt && old_pkt->p.tun_seq==seqn) {
 //      set_reorder(old_pkt);
-  //if (old_pkt->p.type!=UBOND_PKT_DATA || old_pkt->p.reorder || old_pkt->p.data[9]==17) { // only send tcp, e.g. refuse UDP packets!
+      if (old_pkt->p.type!=UBOND_PKT_DATA || old_pkt->p.reorder /*|| old_pkt->p.data[9]==17*/) { // only send tcp, e.g. refuse UDP packets!
         ubond_buffer_write(&hpsend_buffer,old_pkt);
         loss_tun->old_pkts[seqn % RESENDBUFSIZE]=NULL; // remove this from the old list
         if (old_pkt->p.type==UBOND_PKT_DATA) old_pkt->p.type=UBOND_PKT_DATA_RESEND;
@@ -1697,14 +1689,14 @@ ubond_rtun_resend(struct resend_data *d)
         } else {
           log_debug("resend", "No suitable tunnel, unable to resend (tun seq: %lu data seq %lu)",seqn, old_pkt->p.data_seq);
           }*/
-/*      } else {
+      } else {
         log_debug("resend", "Wont resent packet (tun seq: %lu data seq %lu) of type %d", seqn, old_pkt->p.data_seq, (unsigned char)old_pkt->p.data[6]);
-        }*/
+        }
     } else {
       if (old_pkt) {
-        log_debug("resend", "unable to resend seq %lu (Not Found - replaced by %lu)",seqn, old_pkt->p.tun_seq);
+        log_debug("resend+", "unable to resend seq %lu (Not Found - replaced by %lu)",seqn, old_pkt->p.tun_seq);
       } else {
-        log_debug("resend", "unable to resend seq %lu (Not Found - empty slot)",seqn);
+        log_debug("resend+", "unable to resend seq %lu (Not Found - empty slot)",seqn);
       }
       
     }
@@ -1755,23 +1747,6 @@ void ubond_calc_bandwidth(EV_P_ ev_timer *w, int revents)
     bandwidth=((bandwidth*99.0) + new_bw)/100.0;
   }
   
-//  }
-
-  // what we can do here is add any bandwidth allocation
-  // The allocation should be per second.
-  // permittedis in bytes.
-
-//  if (bandwidth) {
-    // use the tunnel MTU
-    // one timer per tunnel...
-
-//    send_timer.repeat = 1/((float)bandwidth/8.0*DEFAULT_MTU);
-    // calc current MTU
-//    send_timer.repeat = 0.01/((bandwidth/8.0)*1000.0/(float)DEFAULT_MTU);
-    
-//  }
-//  printf("Repeat %f %f  %d\n",send_timer.repeat, 1.0/((bandwidth/8.0)*1000.0/(float)DEFAULT_MTU), UBOND_TAILQ_LENGTH(send_buffer));
-
   double new_srtt_av=0;
   ubond_tunnel_t *t;
   int tuns=0;
@@ -1798,7 +1773,7 @@ void ubond_calc_bandwidth(EV_P_ ev_timer *w, int revents)
         if (t->srtt_av > srtt_max) {
           srtt_max=t->srtt_av;
         }
-              // reset so if we get no traffic, we still see a valid srtt
+        // reset so if we get no traffic, we still see a valid srtt
         t->srtt_av_d=0;//t->srtt_raw + (4*t->rttvar);
         t->srtt_av_c=0;//1;
 
@@ -1809,7 +1784,6 @@ void ubond_calc_bandwidth(EV_P_ ev_timer *w, int revents)
       // calc measured bandwidth
       t->bandwidth_measured=((double)t->bm_data/128.0) / diff; // kbits/sec
       t->bm_data=0;
-//    printf("BW: %s %lu\n",t->name, t->bandwidth_measured);
 
       if (t->pkts_cnt>0) {
         t->loss_av=((double)t->loss_event * 100.0)/ (double)t->pkts_cnt;
@@ -1818,22 +1792,16 @@ void ubond_calc_bandwidth(EV_P_ ev_timer *w, int revents)
       t->pkts_cnt=0;
     
       // hunt a high watermark with slow drift
-//      if (t->srtt_av < target) {
       if (t->bandwidth_out > t->bandwidth_max/2)
       {
         double new_bwm=t->bandwidth_max;
-//        double asked=t->bytes_per_sec/128.0;
 
-//        printf("%s ",t->name);
         if (t->sent_loss < t->loss_tolerence/4 &&
             (t->srtt_av < 4*t->srtt_min)) {
 
-//          printf("Loss OK ");
           if (t->sent_loss==0 && (t->bandwidth_out>((float)t->bandwidth_max*0.80))) {
-//            printf(" (GOOD) %d ", t->lossless);
             if (t->lossless) {
               // FASTGROTH MODE
-//              printf(" Fastgrowth ");
               new_bwm*=1.01;
             } else {
               t->lossless++;
@@ -1841,7 +1809,6 @@ void ubond_calc_bandwidth(EV_P_ ev_timer *w, int revents)
           } else {
             if (t->sent_loss!=0 && t->lossless) {
               // correct old fastgrowth
-//              printf(" Drop back ");
               new_bwm*=0.99;
             }
             t->lossless=0;
@@ -1852,25 +1819,16 @@ void ubond_calc_bandwidth(EV_P_ ev_timer *w, int revents)
           }
 
         } else {
-//          printf("Loss BAD ");
           if (t->lossless) {
             // correct old fastgrowth
-//              printf(" Drop back ");
             new_bwm*=0.99;
           }
           t->lossless=0;
           if (t->bandwidth_out<t->bandwidth_max) {
-/*            new_bwm=t->bandwidth_out;
-            printf("bandwidth drop to max\n");
-          } else {
-          
-*/
             new_bwm*=0.995;
           }
           if (new_bwm<100) new_bwm=100;
         }
-//        printf(" %lu %f\n", t->bandwidth_max, new_bwm);
-        
         t->bandwidth_max=new_bwm;//(((float)t->bandwidth_max*3.0)+new_bwm)/4.0;  
       } else {
         if (t->lossless) {
@@ -1879,26 +1837,7 @@ void ubond_calc_bandwidth(EV_P_ ev_timer *w, int revents)
         t->lossless=0;
 
       }
-      
-      
-/*      
-//      if (t->srtt_av < target*0.9 && t->bandwidth < t->bandwidth_max) {
-      if (t->sent_loss==0) {
-        if (t->bandwidth < t->bandwidth_max*1.05) {
-          t->bandwidth=((t->bandwidth*19)+t->bandwidth_max*1.05)/20.0;
-        }
-      } else {
-//      if (t->sent_loss > t->loss_tolerence/4.0)
-        if (t->bandwidth_out > (t->bandwidth_max/2)) { // ignore noise
-          if (t->bandwidth_out < t->bandwidth_max) {
-            t->bandwidth=((t->bandwidth*19) + t->bandwidth_out)/20.0;
-          } else {
-            t->bandwidth=((t->bandwidth*19) + t->bandwidth_max)/20.0;
-          }
-        }
-      }
-      
-*/    
+
       if (t->seq_vect==(uint64_t)-1  /* !t->loss*/) {
         if (t->reorder_length > t->reorder_length_preset) {
           t->reorder_length--;
@@ -1910,53 +1849,22 @@ void ubond_calc_bandwidth(EV_P_ ev_timer *w, int revents)
 
   }
 
-/*  LIST_FOREACH(t, &rtuns, entries) {
-    if (t->status >= UBOND_AUTHOK) {
-      if ((t->bandwidth_out > t->bandwidth_max/4) && (t->bandwidth_max > 100)) {
-        if (tuns>1 && (t->srtt_av > 10*t->srtt_min)) {//((new_srtt_av - t->srtt_av)/(tuns-1))*5)) {
-          printf("SRTT too high %s\n", t->name);
-          t->bandwidth_max*=0.90;
-        }
-        
-      }
-    }
-  }
-*/
-
   srtt_av=new_srtt_av/tuns; // tuns is the OK tunnels
 
   ubond_rtun_recalc_weight();
-//  printf("%d\n",UBOND_TAILQ_LENGTH(send_buffer));
-  
 }
 
 static void
-ubond_rtun_choose(ubond_tunnel_t *rtun)//EV_P_ ev_timer *w, int revents)
+ubond_rtun_choose(ubond_tunnel_t *rtun)
 {
-//  ubond_tunnel_t *rtun=NULL;
-//  rtun = w->data;
-
-//  ev_tstamp now = ev_now(EV_DEFAULT_UC);
-//  ev_tstamp err=(now-rtun->last_choose);
-//  rtun->last_choose=now;
-//  do {
-    
-//  if (!rtun) return;
 
   if (rtun->status!=UBOND_AUTHOK) return;
   if (rtun->quota && rtun->permitted < DEFAULT_MTU*2) return;
 
-//  printf("error %f %f %f\n",((err) - rtun->send_timer.repeat), rtun->send_timer.repeat, (err) );
-
-
-//  printf("%d\n",UBOND_TAILQ_LENGTH(send_buffer));
   ubond_pkt_t *spkt=NULL;
   if (!UBOND_TAILQ_EMPTY(&hpsend_buffer) &&
       (rtun->sent_loss <= (double)rtun->loss_tolerence/4.0)) {
     spkt = UBOND_TAILQ_POP_LAST(&hpsend_buffer);
-//    if (spkt) {
-//      printf("Sending %lu on %s (%lu)\n",spkt->p.data_seq, rtun->name, UBOND_TAILQ_LENGTH(&rtun->sbuf));
-//    }
   } else {
     if (!UBOND_TAILQ_EMPTY(&send_buffer)) {
       spkt = UBOND_TAILQ_POP_LAST(&send_buffer);
@@ -1992,39 +1900,6 @@ ubond_rtun_choose(ubond_tunnel_t *rtun)//EV_P_ ev_timer *w, int revents)
 //    ev_io_start(EV_DEFAULT_UC, &rtun->io_write);
 //  }
   
-/*  ubond_tunnel_t *t;
-  int i;
-  double av_srtt=0;
-  LIST_FOREACH(t, &rtuns, entries) {
-    av_srtt+=t->srtt_av;i++;
-  }
-  av_srtt/=i;
-
-  if (av_srtt>1 && rtun->srtt_raw>1) {
-    rtun->send_timer.repeat *= (((rtun->srtt_raw / av_srtt)-1.0)/100000.0)+1.0;
-  }
-*/
-#if 0
-//  double speedup=(((float)UBOND_TAILQ_LENGTH(send_buffer)+1.0)/(float)PKTBUFSIZE)
-//  + 0.75;
-  ev_tstamp repeat = ((float)len + OVERHEAD) / (((rtun->weight*1024.0)/8.0)/**(speedup)*/);
-  if (UBOND_TAILQ_LENGTH(send_buffer) > PKTBUFSIZE/2) 
-    repeat*=0.90;
-  if (UBOND_TAILQ_LENGTH(send_buffer) < PKTBUFSIZE/4) 
-    repeat*=3.0;
-  rtun->send_timer.repeat = ((rtun->send_timer.repeat * 19) + repeat )/20;
-
-  if (err < rtun->send_timer.repeat) {
-    rtun->send_timer.repeat -= err;
-    break;
-  } else {
-    err-=rtun->send_timer.repeat;
-  }
-#endif  
-//  }
-//  while (err > rtun->send_timer.repeat);
-  
-  
   
   return;
 }
@@ -2059,7 +1934,7 @@ ubond_rtun_send_disconnect(ubond_tunnel_t *t)
         pkt->p.type = UBOND_PKT_DISCONNECT;
         pkt->p.len = 1;
     }
-    ubond_rtun_send(t, UBOND_TAILQ_POP_LAST(&t->hpsbuf));
+    //ubond_rtun_send(t, UBOND_TAILQ_POP_LAST(&t->hpsbuf));// un-necissary, and wont help anyway! 
 }
 
 static void

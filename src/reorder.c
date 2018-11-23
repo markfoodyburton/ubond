@@ -228,10 +228,9 @@ ubond_reorder_reset()
 {
   log_warnx("reorder", "Reset");
   struct ubond_reorder_buffer *b=reorder_buffer;
-  while (!UBOND_TAILQ_EMPTY(&b->list)) {
-    ubond_pkt_t *p = UBOND_TAILQ_FIRST(&b->list);
-    UBOND_TAILQ_REMOVE(&b->list, p);
-    ubond_pkt_release(p);
+  while (!UBOND_TAILQ_EMPTY(&b->list))
+  {
+    ubond_pkt_release(UBOND_TAILQ_POP_LAST(&b->list));
   }
   b->list_size=0;
   b->list_size_max=0;
@@ -253,9 +252,6 @@ void ubond_reorder_insert(ubond_tunnel_t *tun, ubond_pkt_t *pkt)
 {
   struct ubond_reorder_buffer *b=reorder_buffer;
   b->pkts_arrived++;
-
-//  printf("received data seq %lu tun seq %lu from tun %s\n", pkt->p.data_seq,
-//  pkt->p.tun_seq, tun->name);
 
   if ( pkt->p.reorder &&
        (!b->is_initialized  ||
@@ -290,15 +286,7 @@ void ubond_reorder_insert(ubond_tunnel_t *tun, ubond_pkt_t *pkt)
     } else {
       log_debug("resend","Injecting resent %lu",pkt->p.data_seq);
     }
-  } /* dont do a fast path, otherwise the buffer drains too quick
-       else if (pkt->p.data_seq==b->min_seqn) {
-    log_debug("reorder", "Inject TCP packet Just In Time (seqn %lu)", pkt->p.data_seq);
-    b->min_seqn = pkt->p.data_seq+1;
-    ubond_rtun_inject_tuntap(pkt); // this will deliver and free the packet
-    b->delivered++;
-    return;
-    }*/
-
+  } 
   if (aolderb(pkt->p.data_seq, b->min_seqn)) {
     log_debug("loss", "got old insert %d behind (probably agressive pruning) on %s",(int)(b->min_seqn - pkt->p.data_seq), tun->name);
     b->loss++;
