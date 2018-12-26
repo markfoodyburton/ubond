@@ -858,7 +858,7 @@ ubond_rtun_do_send(ubond_tunnel_t *tun)
   //if (tun->sent_loss) {
   //  b*=0.95;
   // }
-    
+
   if ( tun->bytes_since_adjust < b ) {
     if (! UBOND_TAILQ_EMPTY(&tun->hpsbuf)) {
       ubond_pkt_t *pkt=UBOND_TAILQ_POP_LAST(&tun->hpsbuf);
@@ -1105,7 +1105,7 @@ ubond_rtun_recalc_weight()
     }
   }
   if (bwneeded < total/4) {
-    bwneeded=total/6;
+    bwneeded=total/4;
   }
 
   LIST_FOREACH(t, &rtuns, entries) {
@@ -1183,7 +1183,8 @@ ubond_rtun_recalc_weight()
 //    t->send_timer.repeat = 0.0001;//repeat;//*/((t->send_timer.repeat * 19) + repeat )/20;
   } else {
 //    printf("Tunnel reset %s\n",t->name);
-    t->bytes_per_sec = DEFAULT_MTU*2;
+    t->bytes_per_sec = DEFAULT_MTU*2;  //even for non-active tunnels, give
+                                       //them enough bandwidth to do 'timeout pings' etc...
     t->send_timer.repeat = UBOND_IO_TIMEOUT_DEFAULT;
   }
 //    t->send_timer.repeat = UBOND_IO_TIMEOUT_DEFAULT;
@@ -1417,6 +1418,7 @@ ubond_rtun_status_up(ubond_tunnel_t *t)
     char *cmdargs[4] = {tuntap.devname, "rtun_up", t->name, NULL};
     char **env;
     int env_len;
+    enum chap_status old_status = t->status;
     ev_tstamp now = ev_now(EV_DEFAULT_UC);
     t->status = UBOND_AUTHOK;
     t->next_keepalive = NEXT_KEEPALIVE(now, t);
@@ -1435,18 +1437,21 @@ ubond_rtun_status_up(ubond_tunnel_t *t)
 //    ubond_pktbuffer_reset(t->sbuf);
 //    ubond_pktbuffer_reset(t->hpsbuf);
     ubond_update_status();
-    ubond_rtun_wrr_reset(&rtuns, ubond_status.fallback_mode);
-    ubond_script_get_env(&env_len, &env);
-    priv_run_script(3, cmdargs, env_len, env);
-    if (ubond_status.connected > 0 && ubond_status.initialized == 0) {
-        cmdargs[0] = tuntap.devname;
-        cmdargs[1] = "tuntap_up";
-        cmdargs[2] = NULL;
-        priv_run_script(2, cmdargs, env_len, env);
-        ubond_status.initialized = 1;
-    }
-    ubond_free_script_env(env);
     update_process_title();
+    ubond_rtun_recalc_weight();
+//    ubond_rtun_wrr_reset(&rtuns, ubond_status.fallback_mode);
+    if (old_status < UBOND_AUTHOK) {
+        ubond_script_get_env(&env_len, &env);
+        priv_run_script(3, cmdargs, env_len, env);
+        if (ubond_status.connected > 0 && ubond_status.initialized == 0) {
+            cmdargs[0] = tuntap.devname;
+            cmdargs[1] = "tuntap_up";
+            cmdargs[2] = NULL;
+            priv_run_script(2, cmdargs, env_len, env);
+            ubond_status.initialized = 1;
+        }
+        ubond_free_script_env(env);
+    }
 
     while (!UBOND_TAILQ_EMPTY(&t->sbuf)) {
       ubond_pkt_release(UBOND_TAILQ_POP_LAST(&t->sbuf));
@@ -1502,12 +1507,14 @@ ubond_rtun_status_down(ubond_tunnel_t *t)
 //    }
 
     ubond_update_status();
+    update_process_title();
+    ubond_rtun_recalc_weight();
     if (old_status >= UBOND_AUTHOK)
     {
         ubond_script_get_env(&env_len, &env);
         priv_run_script(3, cmdargs, env_len, env);
         /* Re-initialize weight round robin */
-        ubond_rtun_wrr_reset(&rtuns, ubond_status.fallback_mode);
+//        ubond_rtun_wrr_reset(&rtuns, ubond_status.fallback_mode);
         if (ubond_status.connected == 0 && ubond_status.initialized == 1) {
             cmdargs[0] = tuntap.devname;
             cmdargs[1] = "tuntap_down";
@@ -1520,21 +1527,33 @@ ubond_rtun_status_down(ubond_tunnel_t *t)
     have a lot of packets in flight which will never arrive, so recovery MAY be
     quicker with a flush...*/
     }
-    update_process_title();
 }
 
 static void
 ubond_update_status()
 {
     ubond_tunnel_t *t;
-    ubond_status.fallback_mode = ubond_options.fallback_available;
-    ubond_status.connected = 0;
+    int fb=ubond_options.fallback_available;
+    int connected=0;
     LIST_FOREACH(t, &rtuns, entries)
     {
-        if (t->status >= UBOND_AUTHOK) {
+        if (t->status == UBOND_AUTHOK) {
             if (!t->fallback_only)
-                ubond_status.fallback_mode = 0;
-            ubond_status.connected++;
+                fb = 0;
+            connected++;
+        }
+    }
+    if (ubond_status.fallback_mode != fb || ubond_status.connected!=connected) {
+        ubond_status.fallback_mode = fb;
+        ubond_status.connected=connected;
+        if (ubond_status.fallback_mode || !ubond_status.connected) {
+            if (ubond_options.fallback_available) {
+                log_info(NULL, "all tunnels are down or lossy, switching to fallback mode");
+            } else {
+                log_info(NULL, "all tunnels are down or lossy but fallback is not available");
+            }
+        } else {
+            log_info(NULL, "%d tunnels up (normal mode)", connected);
         }
     }
 }
@@ -1860,6 +1879,7 @@ ubond_rtun_choose(ubond_tunnel_t *rtun)
 
   if (rtun->status!=UBOND_AUTHOK) return;
   if (rtun->quota && rtun->permitted < DEFAULT_MTU*2) return;
+  if (ubond_status.fallback_mode!=rtun->fallback_only ) return;
 
   ubond_pkt_t *spkt=NULL;
   if (!UBOND_TAILQ_EMPTY(&hpsend_buffer) &&
@@ -1967,9 +1987,10 @@ ubond_rtun_check_lossy(ubond_tunnel_t *tun)
   }
   /* are all links in lossy mode ? switch to fallback ? */
   if (status_changed) {
+    ubond_update_status();
     update_process_title();
-    ubond_tunnel_t *t;
     ubond_rtun_recalc_weight();
+/*    ubond_tunnel_t *t;
     LIST_FOREACH(t, &rtuns, entries) {
       if (! t->fallback_only && t->status != UBOND_LOSSY) {
         ubond_status.fallback_mode = 0;
@@ -1984,7 +2005,7 @@ ubond_rtun_check_lossy(ubond_tunnel_t *tun)
     } else {
       log_info(NULL, "all tunnels are down or lossy but fallback is not available");
     }
-  }
+*/  }
 }
 
 static void
