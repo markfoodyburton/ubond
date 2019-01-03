@@ -220,6 +220,10 @@ struct ubond_filters_s {
     struct bpf_program filter[255];
     ubond_tunnel_t *tun[255];
 };
+enum ubond_filter_priority {
+    UBOND_FILTER_LOW,
+    UBOND_FILTER_HIGH
+};
 #endif
 
 int ubond_config(int config_file_fd, int first_time);
@@ -241,7 +245,9 @@ void ubond_rtun_drop(ubond_tunnel_t *t);
 void ubond_rtun_status_down(ubond_tunnel_t *t);
 #ifdef HAVE_FILTERS
 int ubond_filters_add(const struct bpf_program *filter, ubond_tunnel_t *tun);
+int ubond_low_filters_add(const struct bpf_program *filter);
 ubond_tunnel_t *ubond_filters_choose(uint32_t pktlen, const u_char *pktdata);
+enum ubond_filter_priority ubond_filters_priority(uint32_t pktlen, const u_char *pktdata);
 void ubond_send_buffer_write(ubond_pkt_t *p);
 #endif
 

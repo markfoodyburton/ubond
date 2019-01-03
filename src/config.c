@@ -34,6 +34,7 @@
 extern char *status_command;
 extern struct ubond_options_s ubond_options;
 extern struct ubond_filters_s ubond_filters;
+extern struct ubond_filters_s ubond_low_filters;
 extern struct tuntap_s tuntap;
 
 char *ip_from_if(char *ifname);
@@ -70,6 +71,7 @@ ubond_config(int config_file_fd, int first_time)
     struct bpf_program filter;
     pcap_t *pcap_dead_p = pcap_open_dead(DLT_RAW, DEFAULT_MTU);
     memset(&ubond_filters, 0, sizeof(ubond_filters));
+    memset(&ubond_low_filters, 0, sizeof(ubond_low_filters));
 #endif
 
     work = config = _conf_parseConfig(config_file_fd);
@@ -474,23 +476,34 @@ ubond_config(int config_file_fd, int first_time)
                 log_warnx("config", "invalid filter %s = %s: %s",
                     work->conf->var, work->conf->val, pcap_geterr(pcap_dead_p));
             } else {
-                found_in_config = 0;
-                LIST_FOREACH(tmptun, &rtuns, entries) {
-                    if (strcmp(work->conf->var, tmptun->name) == 0) {
-                        if (ubond_filters_add(&filter, tmptun) != 0) {
-                            log_warnx("config", "%s filter %s error: too many filters",
-                                tmptun->name, work->conf->val);
+                if (strcmp(work->conf->var, "fallback_filter") == 0) {
+                        if (ubond_low_filters_add(&filter) != 0) {
+                            log_warnx("config", "filter %s error: too many filters",
+                                work->conf->val);
                         } else {
-                            log_debug("config", "%s added filter: %s",
-                                tmptun->name, work->conf->val);
-                            found_in_config = 1;
+                            log_debug("config", "added fallback filter: %s",
+                                work->conf->val);
                             break;
                         }
+                } else {
+                    found_in_config = 0;
+                    LIST_FOREACH(tmptun, &rtuns, entries) {
+                        if (strcmp(work->conf->var, tmptun->name) == 0) {
+                            if (ubond_filters_add(&filter, tmptun) != 0) {
+                                log_warnx("config", "%s filter %s error: too many filters",
+                                          tmptun->name, work->conf->val);
+                            } else {
+                                log_debug("config", "%s added filter: %s",
+                                          tmptun->name, work->conf->val);
+                                found_in_config = 1;
+                                break;
+                            }
+                        }
                     }
-                }
-                if (!found_in_config) {
-                    log_warnx("config", "(filters) %s interface not found",
-                        work->conf->var);
+                    if (!found_in_config) {
+                        log_warnx("config", "(filters) %s interface not found",
+                                  work->conf->var);
+                    }
                 }
             }
         }

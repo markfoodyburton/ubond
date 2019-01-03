@@ -189,6 +189,9 @@ struct ubond_options_s ubond_options = {
 struct ubond_filters_s ubond_filters = {
     .count = 0
 };
+struct ubond_filters_s ubond_low_filters = {
+    .count = 0
+};
 #endif
 
 static char *optstr = "c:n:u:hvVD:p:";
@@ -1880,15 +1883,26 @@ ubond_rtun_choose(ubond_tunnel_t *rtun)
   if (rtun->status!=UBOND_AUTHOK) return;
   if (rtun->quota && rtun->permitted < DEFAULT_MTU*2) return;
   if (ubond_status.fallback_mode!=rtun->fallback_only ) return;
+  if (! UBOND_TAILQ_EMPTY(&rtun->sbuf)) return;
 
   ubond_pkt_t *spkt=NULL;
   if (!UBOND_TAILQ_EMPTY(&hpsend_buffer) &&
       (rtun->sent_loss <= (double)rtun->loss_tolerence/4.0)) {
     spkt = UBOND_TAILQ_POP_LAST(&hpsend_buffer);
   } else {
-    if (!UBOND_TAILQ_EMPTY(&send_buffer)) {
-      spkt = UBOND_TAILQ_POP_LAST(&send_buffer);
-    }
+      {
+  find_pkt:
+          if (!UBOND_TAILQ_EMPTY(&send_buffer)) {
+              spkt = UBOND_TAILQ_POP_LAST(&send_buffer);
+          }
+#ifdef HAVE_FILTERS
+          if (ubond_status.fallback_mode && spkt) {
+              u_char *data=(u_char *)(spkt->p.data);
+              uint32_t len=spkt->p.len;
+              if (ubond_filters_priority(len,data)==UBOND_FILTER_LOW) goto find_pkt;
+          }
+#endif
+      }
   }
   if (!spkt) return;
   
@@ -1897,19 +1911,6 @@ ubond_rtun_choose(ubond_tunnel_t *rtun)
   }
 
   ubond_pkt_list_t *sbuf = &rtun->sbuf;
-  
-#ifdef HAVE_FILTERS
-  u_char *data=(u_char *)(spkt->p.data);
-  uint32_t len=spkt->p.len;
-
-  ubond_tunnel_t *frtun = ubond_filters_choose((uint32_t)len,data);
-  if (frtun) {
-    /* High priority buffer, not reorderd when a filter applies */
-    rtun=frtun;
-    sbuf = &rtun->hpsbuf;
-  }
-#endif
-  
   if (ubond_pkt_list_is_full(sbuf))
     log_warnx("tuntap", "%s buffer: overflow", rtun->name);
   
@@ -2039,12 +2040,32 @@ tuntap_io_event(EV_P_ ev_io *w, int revents)
 {
     if (revents & EV_READ) {
       if (!ubond_pkt_list_is_full(&send_buffer)) {
-        ubond_buffer_write(&send_buffer,ubond_tuntap_read(&tuntap));
+          // We will only accept packets if the global send_buffer has room,
+          // this could affect filters, but only in extreem cases!
+        ubond_pkt_t *spkt=ubond_tuntap_read(&tuntap);
+        ubond_pkt_list_t *sbuf = &send_buffer;
+        if (spkt) {
+#ifdef HAVE_FILTERS
+            u_char *data=(u_char *)(spkt->p.data);
+            uint32_t len=spkt->p.len;
+            ubond_tunnel_t *frtun = ubond_filters_choose((uint32_t)len,data);
+            if (frtun) {
+                printf("sending to filter\n");
+                if (!ubond_pkt_list_is_full(&frtun->sbuf)) {
+                    sbuf=&frtun->sbuf;
+                } else {
+                    log_warn("tuntap", "%s buffer: overflow, sending on normal tunnel", frtun->name);
+                }
+            }
+#endif
+            ubond_buffer_write(sbuf, spkt);
+        }
       } else {
         if (ev_is_active(&tuntap.io_read)) {
           ev_io_stop(EV_A_ &tuntap.io_read);
         }
       }
+
     }
     else if (revents & EV_WRITE) {
       if (!UBOND_TAILQ_EMPTY(&tuntap.sbuf)) {

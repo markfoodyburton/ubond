@@ -104,7 +104,6 @@ _conf_parseConfig(int config_fd)
             linenum++;
             buf[i] = 0;
             newline = _conf_strip_comment(buf, i);
-
             if (newline)
             {
                 if ( (tmp = _conf_get_section(newline, i, linenum)) != NULL)
@@ -221,6 +220,10 @@ _conf_get_section(char *line, unsigned int linelen, unsigned int linenum)
     {
         switch(line[i])
         {
+        case '\"':
+        case '=':
+            return NULL;
+            break;
         case '[':
             if (section)
             {
