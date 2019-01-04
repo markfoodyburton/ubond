@@ -1963,7 +1963,7 @@ ubond_rtun_check_lossy(ubond_tunnel_t *tun)
   double loss = tun->sent_loss;
   int status_changed = 0;
   ev_tstamp now = ev_now(EV_DEFAULT_UC);
-  int keepalive_ok= ((tun->last_keepalive_ack != 0) || (tun->last_keepalive_ack + UBOND_IO_TIMEOUT_DEFAULT/**2 + ((tun->srtt_av/1000.0)*2)*/) > now);
+  int keepalive_ok= ((tun->last_keepalive_ack == 0) || (tun->last_keepalive_ack + (UBOND_IO_TIMEOUT_DEFAULT*2) + ((tun->srtt_av/1000.0)*2)) > now);
 
   if (!keepalive_ok && tun->status == UBOND_AUTHOK) {
     log_info("rtt", "%s keepalive reached threashold, keepalive recieved %fs ago", tun->name, now-tun->last_keepalive_ack);
