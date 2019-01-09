@@ -9,12 +9,10 @@ sbin_PROGRAMS = ubond
 ubond_SOURCES = \
     includes.h defines.h \
     pkt.h \
-    buffer.c buffer.h \
     configlib.c configlib.h \
     config.c \
     tool.c tool.h \
     privsep.c privsep_fdpass.c privsep.h \
-    wrr.c \
     crypto.c crypto.h \
     log.c log.h \
     reorder.h reorder.c \

@@ -9,6 +9,8 @@
 #include "tuntap_generic.h"
 #include "tool.h"
 
+this file needs re-working in line with the linux version.
+
 int
 ubond_tuntap_read(struct tuntap_s *tuntap)
 {

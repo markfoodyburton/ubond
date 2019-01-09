@@ -42,7 +42,6 @@
 #endif
 
 #include "pkt.h"
-#include "buffer.h"
 #include "timestamp.h"
 
 #define UBOND_MAXHNAMSTR 256
@@ -226,10 +225,8 @@ int ubond_config(int config_file_fd, int first_time);
 int ubond_sock_set_nonblocking(int fd);
 
 int ubond_loss_ratio(ubond_tunnel_t *tun);
-//int ubond_rtun_wrr_reset(struct rtunhead *head, int use_fallbacks);
 void ubond_rtun_set_weight(ubond_tunnel_t *t, double weight);
-//ubond_tunnel_t *ubond_rtun_wrr_choose();
-//ubond_tunnel_t *ubond_rtun_choose(uint32_t len);
+
 ubond_tunnel_t *ubond_rtun_new(const char *name,
     const char *bindaddr, const char *bindport, const char *binddev, uint32_t bindfib,
     const char *destaddr, const char *destport,

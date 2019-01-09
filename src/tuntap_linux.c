@@ -7,7 +7,6 @@
 #include <linux/if_tun.h>
 #include <linux/if.h>
 
-#include "buffer.h"
 #include "tuntap_generic.h"
 #include "tool.h"
 #include "pkt.h"

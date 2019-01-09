@@ -12,7 +12,6 @@
 #include <errno.h>
 #include <ev.h>
 
-#include "buffer.h"
 #include "privsep.h"
 #include "ubond.h"
 
