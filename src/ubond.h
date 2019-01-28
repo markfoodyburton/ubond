@@ -148,28 +148,20 @@ typedef struct ubond_tunnel_s
     int disconnects;      /* is it stable ? */
     int conn_attempts;    /* connection attempts */
     int fallback_only;    /* if set, this link will be used when all others are down */
-    uint32_t loss_tolerence; /* How much loss is acceptable before the link is
-                              * discarded */
     double sent_loss;   /* loss as reported by far end */
     uint64_t loss_cnt;
     uint64_t loss_event;
     uint64_t pkts_cnt;
     double loss_av;    /* our average loss */
     uint64_t seq;
-//    uint64_t expected_receiver_seq;
     uint64_t saved_timestamp;
     uint64_t saved_timestamp_received_at;
     uint64_t seq_last;
     uint64_t seq_vect;
-//    uint64_t last_seen;
-    int rtt_hit;
-    double srtt;
     double srtt_av;
     double srtt_av_d;
     double srtt_av_c;
-    double srtt_raw;
     double srtt_min;
-    double rttvar;
     double weight;        /* For weight round robin */
     uint32_t flow_id;
     uint64_t sentpackets; /* 64bit packets sent counter */
@@ -187,7 +179,6 @@ typedef struct ubond_tunnel_s
     uint64_t bandwidth_measured;
     uint64_t bm_data;
     uint64_t bandwidth_out;
-//    uint32_t bandwidth_asked;
     ubond_pkt_list_t sbuf;    /* send buffer */
     ubond_pkt_list_t hpsbuf;  /* high priority buffer */
     struct addrinfo *addrinfo;
@@ -201,7 +192,6 @@ typedef struct ubond_tunnel_s
     ev_io io_write;
     ev_timer io_timeout;
     ev_check check_ev;
-//      ev_idle idle_ev;
 
     ev_timer send_timer;
     ev_tstamp last_adjust;
@@ -231,8 +221,7 @@ ubond_tunnel_t *ubond_rtun_new(const char *name,
     const char *bindaddr, const char *bindport, const char *binddev, uint32_t bindfib,
     const char *destaddr, const char *destport,
     int server_mode, uint32_t timeout,
-    int fallback_only, uint32_t bandwidth,
-    uint32_t loss_tolerence, uint32_t quota,
+    int fallback_only, uint32_t bandwidth, uint32_t quota,
     uint32_t reorder_length);
 void ubond_rtun_drop(ubond_tunnel_t *t);
 void ubond_rtun_status_down(ubond_tunnel_t *t);

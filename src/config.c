@@ -57,7 +57,6 @@ ubond_config(int config_file_fd, int first_time)
     char *password = NULL;
     uint32_t tun_mtu = 0;
 
-    uint32_t default_loss_tolerence = 100;
     uint32_t default_timeout = 60;
     uint32_t default_server_mode = 0; /* 0 => client */
     uint32_t cleartext_data = 0;
@@ -176,14 +175,6 @@ ubond_config(int config_file_fd, int first_time)
                   }
                 }
 
-                _conf_set_uint_from_conf(
-                    config, lastSection, "loss_tolerence",
-                    &default_loss_tolerence, 100,  NULL, 0);
-                if (default_loss_tolerence > 100) {
-                    log_warnx("config", "loss_tolerence is capped to 100 %%");
-                    default_loss_tolerence = 100;
-                }
-
                 /* Tunnel configuration */
                 _conf_set_str_from_conf(
                     config, lastSection, "ip4", &tmp, NULL, NULL, 0);
@@ -265,7 +256,6 @@ ubond_config(int config_file_fd, int first_time)
                 uint32_t quota = 0;
                 uint32_t reorder_length = 1;
                 uint32_t timeout = 30;
-                uint32_t loss_tolerence=default_loss_tolerence;
                 int create_tunnel = 1;
 
                 if (default_server_mode)
@@ -323,13 +313,6 @@ ubond_config(int config_file_fd, int first_time)
                 if (timeout < 5) {
                     log_warnx("config", "timeout capped to 5 seconds");
                     timeout = 5;
-                }
-                _conf_set_uint_from_conf(
-                    config, lastSection, "loss_tolerence", &loss_tolerence,
-                    default_loss_tolerence, NULL, 0);
-                if (loss_tolerence > 100) {
-                    log_warnx("config", "loss_tolerence is capped to 100 %%");
-                    loss_tolerence = 100;
                 }
                 _conf_set_uint_from_conf(
                     config, lastSection, "fallback_only", &fallback_only, 0,
@@ -399,12 +382,6 @@ ubond_config(int config_file_fd, int first_time)
                                 tmptun->name, tmptun->reorder_length_preset, reorder_length);
                             tmptun->reorder_length_preset = reorder_length;
                         }
-                        if (tmptun->loss_tolerence != loss_tolerence)
-                        {
-                            log_info("config", "%s loss tolerence changed from %d%% to %d%%",
-                                tmptun->name, tmptun->loss_tolerence, loss_tolerence);
-                            tmptun->loss_tolerence = loss_tolerence;
-                        }
                         create_tunnel = 0;
                         break; /* Very important ! */
                     }
@@ -416,7 +393,7 @@ ubond_config(int config_file_fd, int first_time)
                     ubond_rtun_new(
                         lastSection, bindaddr, bindport, binddev, bindfib, dstaddr, dstport,
                         default_server_mode, timeout, fallback_only,
-                        bwlimit, loss_tolerence, quota, reorder_length);
+                        bwlimit, quota, reorder_length);
                 }
                 if (bindaddr)
                     free(bindaddr);

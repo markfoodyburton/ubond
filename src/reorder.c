@@ -114,7 +114,6 @@ void ubond_reorder_drain_check(EV_P_ ev_check *w, int revents)
   struct ubond_reorder_buffer *b=reorder_buffer;
   ev_tstamp now=ev_now(EV_DEFAULT_UC);
   ev_tstamp diff=now - b->last_tick;
-//  printf("%f %lu %f \n", diff, b->pkts_sent, b->pkts_per_sec);
   
   if (b->pkts_sent < b->pkts_per_sec * diff) {
     b->pkts_sent++;
@@ -127,7 +126,6 @@ void ubond_reorder_tick(EV_P_ ev_timer *w, int revents)
   struct ubond_reorder_buffer *b=reorder_buffer;
   ubond_tunnel_t *t;
   double max_srtt = 0.0;
-  int ts=0;
 
   ev_tstamp now=ev_now(EV_DEFAULT_UC);
   ev_tstamp diff=now - b->last_tick;
@@ -150,7 +148,6 @@ void ubond_reorder_tick(EV_P_ ev_timer *w, int revents)
        */
       if (t->srtt_av > max_srtt) {
         max_srtt = t->srtt_av;
-//        ts++;
       }
         
     }
@@ -160,17 +157,11 @@ void ubond_reorder_tick(EV_P_ ev_timer *w, int revents)
     b->is_initialized=0;
   }
   
-  if (ts>0) {
-//    max_srtt/=ts;
-  }
-  
   if (max_srtt <= 0) {
     max_srtt=800;
   }
 
   b->max_srtt=  (b->max_srtt*9 + max_srtt)/10;
-  
-//  printf("%lu pkts arrived, %lu sent, %f pkts expected\n",b->pkts_arrived, b->pkts_sent, b->pkts_per_sec * diff);
   
   if (diff) {
 //    9/10 is too long, but 0 is too short?
@@ -182,18 +173,8 @@ void ubond_reorder_tick(EV_P_ ev_timer *w, int revents)
       b->pkts_per_sec=((b->pkts_per_sec *4.0)+pps)/5.0;
     }
 
-//  b->pkts_per_sec=((float)b->pkts_arrived/diff);
-/*      
-    ev_tstamp av=((b->diff / (float)b->arrived)/2.0);
-    b->arrived=0;
-    if (av > 0 && av < 1) {
-      reorder_drain_timeout.repeat=av;
-    } else {
-      reorder_drain_timeout.repeat=0.01;
-      }*/
   } else {
     b->pkts_per_sec=(float)b->pkts_arrived;
-//    reorder_drain_timeout.repeat=0.01;
   }
   b->pkts_sent=0;
   b->pkts_arrived=0;
@@ -209,14 +190,10 @@ void ubond_reorder_init()
 {
   reorder_buffer=malloc(sizeof(struct ubond_reorder_buffer));
   UBOND_TAILQ_INIT(&reorder_buffer->list);
-//  reorder_drain_timeout.repeat = 0.01;
   reorder_buffer->enabled=0;
   ubond_reorder_reset();
 
   ev_check_init(&reorder_buffer->reorder_drain_check, ubond_reorder_drain_check);
-
-//  ev_init(&reorder_drain_timeout, &ubond_reorder_drain_timeout);
-//  ev_timer_start(EV_A_ &reorder_drain_timeout);
 
   ev_timer_init(&reorder_timeout_tick, &ubond_reorder_tick, 0., 0.25);
   ev_timer_start(EV_A_ &reorder_timeout_tick);
@@ -340,7 +317,6 @@ void ubond_reorder_drain()
   unsigned int drain_cnt = 0;
   // 2.2 is a good window size
   // 3 * more when we have resends (there and back + processing time etc)
-//  ev_tstamp t=(((double)b->max_srtt/1000.0)*(out_resends?6.6:2.2));
 
   /*some NS t respod - lest say 150
     then - lest say we wnt to be able to handle 50 errors
@@ -353,13 +329,8 @@ void ubond_reorder_drain()
     thats how many we want IN THE QUEUE
     so if we're /2, then we have to *2....*/
 
-//  double srtt_diff = max_srtt - min_srtt;
-  
   ev_tstamp now=ev_now(EV_DEFAULT_UC);
   ev_tstamp t=((/*(double)b->*/srtt_min*3/1000.0)*2.2);//+2.6; // +300ms processing time
-//  ev_tstamp t=/*(((double)b->max_srtt/1000.0))+*/3.0; // +300ms processing
-//  time
-
   
   if (resend_at < (now - (2.2 * (/*(double)b->*/srtt_min*3/1000.0)))) {
     // we're never going to get a resend, you may as well drop!
@@ -378,8 +349,6 @@ void ubond_reorder_drain()
     }
   }
   
-//  ev_tstamp cut=ev_now(EV_DEFAULT_UC) -  (UBOND_IO_TIMEOUT_DEFAULT*(out_resends?4:2));
-
 /* We should
   deliver all packets in order
     Packets that are 'before' the current 'minium' - drop
@@ -396,19 +365,16 @@ void ubond_reorder_drain()
 */
 
 
-  int clearall=0;
   while (!UBOND_TAILQ_EMPTY(&b->list) &&
          ( aoldereqb(UBOND_TAILQ_LAST(&b->list)->p.data_seq, b->min_seqn)
            || (UBOND_TAILQ_LAST(&b->list)->timestamp < cut)
            || (b->list_size > b->target_len)
-           || clearall
            ))
   {
 
-    if (!aoldereqb(UBOND_TAILQ_LAST(&b->list)->p.data_seq, b->min_seqn) ) {
-      log_debug("loss","Clearing: list size %d target %d last %f cut %f (%fs ago now: %fs)  outstanding resends %lu", b->list_size, b->target_len, UBOND_TAILQ_LAST(&b->list)->timestamp, cut, t, now,  out_resends);
-//      clearall=1;
-    }
+//    if (!aoldereqb(UBOND_TAILQ_LAST(&b->list)->p.data_seq, b->min_seqn) ) {
+//      log_debug("loss","Clearing: list size %d target %d last %f cut %f (%fs ago now: %fs)  outstanding resends %lu", b->list_size, b->target_len, UBOND_TAILQ_LAST(&b->list)->timestamp, cut, t, now,  out_resends);
+//    }
     ubond_pkt_t *l = UBOND_TAILQ_LAST(&b->list);
     UBOND_TAILQ_REMOVE(&b->list, l);
 
@@ -420,7 +386,7 @@ void ubond_reorder_drain()
       b->delivered++;
       log_debug("reorder","Delivered data seq %lu (tun seq %lu)", l->p.data_seq, l->p.tun_seq);
       b->min_seqn=l->p.data_seq+1;
-      if (b->list_size < (b->target_len/2) && !clearall) break;
+      if (b->list_size < (b->target_len/2)) break;
     } else if (aolderb(b->min_seqn, l->p.data_seq)) { // cut off time reached
       ubond_rtun_inject_tuntap(l);
       b->delivered++;
@@ -433,13 +399,6 @@ void ubond_reorder_drain()
       log_debug("loss","Lost %lu, (trying to deliver %lu) (tun seq %lu)", l->p.data_seq, b->min_seqn, l->p.tun_seq);
     }
   }
-  if (clearall) {
-    while(!UBOND_TAILQ_EMPTY(&send_buffer)) {
-      // we shoudl only throw away TCP packets!
-      ubond_pkt_release(UBOND_TAILQ_POP_LAST(&send_buffer));
-    }
-  }  
-
 
   if (out_resends > b->list_size) out_resends=b->list_size;
 
