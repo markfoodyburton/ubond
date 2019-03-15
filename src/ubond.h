@@ -108,6 +108,7 @@ struct ubond_options_s
     /* User change if running as root */
     char unpriv_user[128];
     int cleartext_data;
+    int static_tunnel;
     int root_allowed;
     uint32_t reorder_buffer_size;
     uint32_t fallback_available;

@@ -182,6 +182,7 @@ struct ubond_options_s ubond_options = {
     .verbose = 2,
     .unpriv_user = "ubond",
     .cleartext_data = 1,
+    .static_tunnel = 0,
     .root_allowed = 0,
 };
 #ifdef HAVE_FILTERS
@@ -218,6 +219,7 @@ static int ubond_rtun_send(ubond_tunnel_t *tun, ubond_pkt_t *pkt);
 static void ubond_rtun_resend(struct resend_data *d);
 static void ubond_rtun_request_resend(ubond_tunnel_t *loss_tun, uint64_t tun_seqn, int len);
 static void ubond_rtun_send_auth(ubond_tunnel_t *t);
+static void ubond_rtun_tuntap_up();
 static void ubond_rtun_status_up(ubond_tunnel_t *t);
 static void ubond_rtun_tick_connect(ubond_tunnel_t *t);
 static void ubond_rtun_recalc_weight();
@@ -1319,11 +1321,23 @@ ubond_free_script_env(char **env)
 }
 
 static void
+ubond_rtun_tuntap_up()
+{
+    if ((ubond_status.connected > 0 || ubond_options.static_tunnel) &&
+        ubond_status.initialized == 0) {
+        char *cmdargs[4] = {tuntap.devname, "tuntap_up", NULL, NULL};
+        char **env;
+        int env_len;
+        ubond_script_get_env(&env_len, &env);
+        priv_run_script(2, cmdargs, env_len, env);
+        ubond_status.initialized = 1;
+        ubond_free_script_env(env);
+    }
+}
+
+static void
 ubond_rtun_status_up(ubond_tunnel_t *t)
 {
-    char *cmdargs[4] = {tuntap.devname, "rtun_up", t->name, NULL};
-    char **env;
-    int env_len;
     enum chap_status old_status = t->status;
     ev_tstamp now = ev_now(EV_DEFAULT_UC);
     t->status = UBOND_AUTHOK;
@@ -1343,16 +1357,13 @@ ubond_rtun_status_up(ubond_tunnel_t *t)
     update_process_title();
     ubond_rtun_recalc_weight();
     if (old_status < UBOND_AUTHOK) {
+        char *cmdargs[4] = {tuntap.devname, "rtun_up", t->name, NULL};
+        char **env;
+        int env_len;
         ubond_script_get_env(&env_len, &env);
         priv_run_script(3, cmdargs, env_len, env);
-        if (ubond_status.connected > 0 && ubond_status.initialized == 0) {
-            cmdargs[0] = tuntap.devname;
-            cmdargs[1] = "tuntap_up";
-            cmdargs[2] = NULL;
-            priv_run_script(2, cmdargs, env_len, env);
-            ubond_status.initialized = 1;
-        }
         ubond_free_script_env(env);
+        ubond_rtun_tuntap_up();
     }
 
     while (!UBOND_TAILQ_EMPTY(&t->sbuf)) {
@@ -2208,6 +2219,9 @@ main(int argc, char **argv)
     /* re-compute rtun weight based on bandwidth allocation */
     ubond_rtun_recalc_weight();
 
+    if (ubond_options.static_tunnel) {
+        ubond_rtun_tuntap_up();
+    }
     /* Last check before running */
     if (getppid() == 1)
         fatalx("Privileged process died");

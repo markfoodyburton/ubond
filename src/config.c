@@ -60,6 +60,7 @@ ubond_config(int config_file_fd, int first_time)
     uint32_t default_timeout = 60;
     uint32_t default_server_mode = 0; /* 0 => client */
     uint32_t cleartext_data = 0;
+    uint32_t static_tunnel = 0;
     uint32_t fallback_only = 0;
 
     ubond_options.fallback_available = 0;
@@ -155,6 +156,10 @@ ubond_config(int config_file_fd, int first_time)
                     NULL, 0);
                 ubond_options.cleartext_data = cleartext_data;
 
+                _conf_set_uint_from_conf(
+                    config, lastSection, "static_tunnel", &static_tunnel, 0,
+                    NULL, 0);
+                ubond_options.static_tunnel = static_tunnel;
 
                 _conf_set_uint_from_conf(
                     config, lastSection, "timeout", &default_timeout, 60,
