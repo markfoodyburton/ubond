@@ -1421,7 +1421,8 @@ ubond_rtun_status_down(ubond_tunnel_t *t)
         ubond_script_get_env(&env_len, &env);
         priv_run_script(3, cmdargs, env_len, env);
         /* Re-initialize weight round robin */
-        if (ubond_status.connected == 0 && ubond_status.initialized == 1) {
+        if (ubond_status.connected == 0 && ubond_status.initialized == 1 &&
+            ubond_options.static_tunnel == 0) {
             cmdargs[0] = tuntap.devname;
             cmdargs[1] = "tuntap_down";
             cmdargs[2] = NULL;
