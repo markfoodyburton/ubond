@@ -4,7 +4,7 @@ UBOND - Usermode Bonding
 [![Build Status](https://travis-ci.org/zehome/UBOND.svg?branch=master)](https://travis-ci.org/zehome/UBOND)
 [![Coverity Status](https://scan.coverity.com/projects/4405/badge.svg)](https://scan.coverity.com/projects/4405)
 
-author: Laurent Coustet <ed arobase zehome.com>
+author: Mark Burton (from original code by Laurent Coustet <ed arobase zehome.com>)
 
 Take a look at the official documentation on [Read The Docs](http://ubond.readthedocs.org/en/latest/)
 
