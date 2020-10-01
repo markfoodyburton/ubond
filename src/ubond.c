@@ -811,15 +811,18 @@ ubond_rtun_do_send(ubond_tunnel_t *tun)
   // if there is hp stuff for us - SEND IT !
   double b=tun->bytes_per_sec * diff;
 
+  tun->idle=0;
   if ( tun->bytes_since_adjust < b ) {
     if (! UBOND_TAILQ_EMPTY(&tun->hpsbuf)) {
       ubond_pkt_t *pkt=UBOND_TAILQ_POP_LAST(&tun->hpsbuf);
       len = ubond_rtun_send(tun, pkt);
     } else {
-      ubond_rtun_choose(tun);//EV_P_ ev_timer *w, int revents);  
+      ubond_rtun_choose(tun);//EV_P_ ev_timer *w, int revents);
       if (! UBOND_TAILQ_EMPTY(&tun->sbuf)) {
         ubond_pkt_t *pkt=UBOND_TAILQ_POP_LAST(&tun->sbuf);
         len = ubond_rtun_send(tun, pkt);
+      } else {
+        tun->idle=1;
       }
     }
     if (ev_is_active(&tun->check_ev)) {
@@ -1048,9 +1051,9 @@ ubond_rtun_recalc_weight()
       if ((t->quota == 0) || (t->permitted > (t->bandwidth_max*128*BANDWIDTHCALCTIME))) {
 
         double part=1;
-        if (t->sent_loss>=(LOSS_TOLERENCE/6.0)) {
-          double lt=LOSS_TOLERENCE / 3.0;
-          part = ((lt-(double)t->sent_loss)/lt);
+        double lt=LOSS_TOLERENCE / 2.0;
+        if (t->sent_loss>=lt) {
+          part = 1.0 - (((double)t->sent_loss - lt)/(LOSS_TOLERENCE-lt));
           if (part<=0.2) part=0.2;
         }
         // 0 is too little - 3 is too much!
@@ -1909,6 +1912,14 @@ tuntap_io_event(EV_P_ ev_io *w, int revents)
     if (revents & EV_READ) {
       if (!ubond_pkt_list_is_full(&send_buffer)) {
         ubond_buffer_write(&send_buffer,ubond_tuntap_read(&tuntap));
+        ubond_tunnel_t *t;
+        ev_now_update(EV_DEFAULT_UC);
+        LIST_FOREACH(t, &rtuns, entries) {
+          if (t->idle) {
+            ubond_rtun_do_send(t);
+            if (UBOND_TAILQ_EMPTY(&send_buffer)) break;
+          }
+        }
       } else {
         if (ev_is_active(&tuntap.io_read)) {
           ev_io_stop(EV_A_ &tuntap.io_read);

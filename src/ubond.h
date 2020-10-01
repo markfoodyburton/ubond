@@ -199,7 +199,8 @@ typedef struct ubond_tunnel_s
     uint64_t bytes_since_adjust;
     double bytes_per_sec;
     int lossless;
-    int busy_writing;  
+    int busy_writing;
+    int idle;
 
     ubond_pkt_t *old_pkts[RESENDBUFSIZE];
 } ubond_tunnel_t;
