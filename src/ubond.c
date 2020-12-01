@@ -179,7 +179,7 @@ struct ubond_options_s ubond_options = {
     .config_path = "ubond.conf",
     .config_fd = -1,
     .debug = 0,
-    .verbose = 2,
+    .verbose = 0,
     .unpriv_user = "ubond",
     .cleartext_data = 1,
     .static_tunnel = 0,
@@ -2043,7 +2043,7 @@ main(int argc, char **argv)
     if (time(&ubond_status.last_reload) == -1)
         log_warn(NULL, "last_reload time() failed");
 
-    log_init(1, 2, "ubond");
+//    log_init(1, 2, "ubond");
 
     _progname = strdup(__progname);
     saved_argv = calloc(argc + 1, sizeof(*saved_argv));
