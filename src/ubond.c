@@ -261,7 +261,8 @@ void preset_permitted(int argc, char **argv)
   ubond_tunnel_t *t;
   char tunname[21];
   uint64_t val=0;
-  char c, mag=0;
+  int c;
+  char mag=0;
   int filled, option_index;
   optind=0;
     while(1)
