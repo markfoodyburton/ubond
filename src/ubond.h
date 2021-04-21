@@ -160,9 +160,11 @@ typedef struct ubond_tunnel_s
     uint64_t seq_last;
     uint64_t seq_vect;
     double srtt_av;
-    double srtt_av_d;
-    double srtt_av_c;
+    double srtt;    
+    double srtt_d;
+    double srtt_c;
     double srtt_min;
+    double srtt_reductions;
     double weight;        /* For weight round robin */
     uint32_t flow_id;
     uint64_t sentpackets; /* 64bit packets sent counter */
@@ -176,7 +178,7 @@ typedef struct ubond_tunnel_s
     uint32_t reorder_length_max;
     uint32_t timeout;     /* configured timeout in seconds */
     uint64_t bandwidth_max;   /* max bandwidth in bytes per second */
-    uint64_t bandwidth;   /* current bandwidth in bytes per second */
+    //uint64_t bandwidth;   /* current bandwidth in bytes per second */
     uint64_t bandwidth_measured;
     uint64_t bm_data;
     uint64_t bandwidth_out;
@@ -193,6 +195,7 @@ typedef struct ubond_tunnel_s
     ev_io io_write;
     ev_timer io_timeout;
     ev_check check_ev;
+    ev_idle idle_ev;
 
     ev_timer send_timer;
     ev_tstamp last_adjust;
@@ -200,7 +203,6 @@ typedef struct ubond_tunnel_s
     double bytes_per_sec;
     int lossless;
     int busy_writing;
-    int idle;
 
     ubond_pkt_t *old_pkts[RESENDBUFSIZE];
 } ubond_tunnel_t;

@@ -373,7 +373,7 @@ ubond_config(int config_file_fd, int first_time)
                               bwlimit=10000;
                             }
                             tmptun->bandwidth_max = bwlimit;
-                            tmptun->bandwidth = bwlimit;
+//                            tmptun->bandwidth = bwlimit;
                         }
                         if (tmptun->quota != quota)
                         {
