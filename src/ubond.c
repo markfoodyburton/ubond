@@ -807,7 +807,7 @@ ubond_rtun_send(ubond_tunnel_t *tun, ubond_pkt_t *pkt)
 
 
 static void
-ubond_rtun_do_send(ubond_tunnel_t *tun)
+ubond_rtun_do_send(ubond_tunnel_t *tun, int timed)
 {
   ev_tstamp now = ev_now(EV_DEFAULT_UC);
   ev_tstamp diff = now - tun->last_adjust;
@@ -818,11 +818,13 @@ ubond_rtun_do_send(ubond_tunnel_t *tun)
 
   if (tun->busy_writing) return;
 
-  if ( (double)(tun->bytes_since_adjust) < b) {
+  if ( timed || (double)(tun->bytes_since_adjust) < b) {
+#ifdef USEIDLELOOP
     if (ev_is_active(&tun->check_ev)) {
       ev_check_stop(EV_A_ &tun->check_ev);
       ev_idle_stop(EV_A_ &tun->idle_ev);
     }
+#endif
     if (! UBOND_TAILQ_EMPTY(&tun->hpsbuf)) {
       ubond_pkt_t *pkt=UBOND_TAILQ_POP_LAST(&tun->hpsbuf);
       len = ubond_rtun_send(tun, pkt);
@@ -844,15 +846,18 @@ ubond_rtun_do_send(ubond_tunnel_t *tun)
       if (!ev_is_active(&tun->io_write)) {
         ev_io_start(EV_A_ &tun->io_write);
       }
+      tun->send_timer.repeat = (double)(len  + IP4_UDP_OVERHEAD )/ tun->bytes_per_sec;
     }
   } else {
 // we're too soon, use a checker to wait for the right time
 //double tte=(tun->bytes_since_adjust - b)/(tun->bandwidth_max * 128);
 //printf("wait %s %lld %f target %f bytes/s max %lld kbits time diff %f (%f to early)\n", tun->name, tun->bytes_since_adjust, b ,tun->bytes_per_sec , tun->bandwidth_max, diff, tte);
+#ifdef USEIDLELOOP
     if (!ev_is_active(&tun->check_ev)) {
       ev_check_start(EV_A_ &tun->check_ev);
       ev_idle_start(EV_A_ &tun->idle_ev);
     }
+#endif
   }
 
   
@@ -864,21 +869,21 @@ ubond_rtun_write(EV_P_ ev_io *w, int revents)
   if (tun->busy_writing) {
     tun->busy_writing--;
   }
-  ubond_rtun_do_send(tun);
+  ubond_rtun_do_send(tun, 0);
 }
 
 static void
 ubond_rtun_write_timeout(EV_P_ ev_timer *w, int revents)
 {
   ubond_tunnel_t *tun = w->data;
-  if (!tun->busy_writing) ubond_rtun_do_send(tun);
+  if (!tun->busy_writing) ubond_rtun_do_send(tun, 1);
 }
 
 static void
 ubond_rtun_write_check(EV_P_ ev_check *w, int revents)
 {
   ubond_tunnel_t *tun = w->data;
-  if (!tun->busy_writing) ubond_rtun_do_send(tun);
+  if (!tun->busy_writing) ubond_rtun_do_send(tun, 0);
 }
 
 ubond_tunnel_t *
@@ -981,8 +986,10 @@ ubond_rtun_new(const char *name,
     ev_timer_start(EV_A_ &new->io_timeout);
     new->check_ev.data = new;
     ev_check_init(&new->check_ev, ubond_rtun_write_check);
+#ifdef USEIDLELOOP
     new->idle_ev.data = new;
     ev_idle_init(&new->idle_ev, ubond_rtun_write_check);
+#endif
     new->send_timer.data = new;
     ev_timer_init(&new->send_timer, &ubond_rtun_write_timeout, 0., 0.01);
     ev_timer_start(EV_A_ &new->send_timer);
@@ -1111,12 +1118,6 @@ ubond_rtun_recalc_weight()
       if (t->weight>0) {
           double b = t->weight*128.0;
           t->bytes_per_sec=b;
-
-          ev_tstamp repeat = (float)(DEFAULT_MTU/10) / t->bytes_per_sec;
-
-          if (repeat > UBOND_IO_TIMEOUT_DEFAULT/2) repeat=UBOND_IO_TIMEOUT_DEFAULT/2;
-          t->send_timer.repeat = repeat;//*/((t->send_timer.repeat * 19) + repeat
-          //*)/20;
       } else {
           t->bytes_per_sec = DEFAULT_MTU*2;  //even for non-active tunnels, give
           //them enough bandwidth to do 'timeout pings' etc...
@@ -1698,6 +1699,8 @@ void ubond_calc_bandwidth(EV_P_ ev_timer *w, int revents)
       t->bandwidth_measured=(t->bm_data/128) * INVERSEBWCALCTIME; // kbits/sec
       t->bm_data=0;
 
+      double bandwidth_sent = ((t->bytes_since_adjust/128.0) / diff);
+
       double reductions = ((double)t->srtt_reductions / (double)t->pkts_cnt)*100.0;
       if (t->pkts_cnt < 10) reductions=0;
 
@@ -1723,7 +1726,6 @@ void ubond_calc_bandwidth(EV_P_ ev_timer *w, int revents)
       }
 */
       // hunt a high watermark with slow drift
-      double bandwidth_sent = ((t->bytes_since_adjust/128.0) / diff);
       if (bandwidth_sent > t->bandwidth_max/2) 
       {
         double new_bwm=t->bandwidth_max;
@@ -1949,14 +1951,13 @@ tuntap_io_event(EV_P_ ev_io *w, int revents)
         ubond_buffer_write(&send_buffer,pkt);
         ubond_tunnel_t *t;
         // ev_now_update(EV_DEFAULT_UC);
-        //LIST_FOREACH(t, &rtuns, entries) {
-        //  if (!t->busy_writing) {
-        //    ubond_rtun_do_send(t);
-        //    if (UBOND_TAILQ_EMPTY(&send_buffer)) break;
-        //  }
-        //}
+        LIST_FOREACH(t, &rtuns, entries) {
+          if (!t->busy_writing) {
+            ubond_rtun_do_send(t,0);
+            if (UBOND_TAILQ_EMPTY(&send_buffer)) break;
+          }
+        }
       }
-      //printf("HERE %d \n",send_buffer.length);
       if (ubond_pkt_list_is_full(&send_buffer) )  {
         if (ev_is_active(&tuntap.io_read)) {
           ev_io_stop(EV_A_ &tuntap.io_read);

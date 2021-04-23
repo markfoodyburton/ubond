@@ -61,7 +61,7 @@ $ sudo apt-get install build-essential make autoconf libev-dev libsodium-dev lib
 $ sudo pacman -S base-devel git libev libsodium
 $ ./autogen.sh
 $ ./configure
-$ make
+$ make CFLAGS="-O3 -DEV_USE_NANOSLEEP"
 $ make install
 ```
 
