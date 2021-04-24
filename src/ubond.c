@@ -1682,6 +1682,9 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
                 }
                 t->srtt_d = 0;
                 t->srtt_c = 0;
+            } else {
+                t->srtt = srtt_min;
+                t->srtt_av = ((t->srtt_av * 9) + t->srtt) / 10;                
             }
 
             // calc measured bandwidth for INCOMMING
