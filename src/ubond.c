@@ -336,8 +336,8 @@ inline static void ubond_rtun_tick(ubond_tunnel_t* tun)
 /* Inject the packet to the tuntap device (real network) */
 void ubond_rtun_inject_tuntap(ubond_pkt_t* pkt)
 {
-
-    ubond_tuntap_write(&tuntap, pkt);
+    if (!ubond_stream_write(pkt))
+        ubond_tuntap_write(&tuntap, pkt);
 
     //UBOND_TAILQ_INSERT_HEAD(&tuntap.sbuf, pkt);
     ///* Send the packet back into the LAN */
@@ -639,7 +639,7 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     tun->seq++; // ALL packets are stored in the resend old_pkts buffer, even if
     // they fail to send.
 
-    proto->flow_id = tun->flow_id;
+    //proto->flow_id = tun->flow_id; this is now handled by socks
     proto->version = UBOND_PROTOCOL_VERSION;
     proto->sent_loss = tun->loss;
 

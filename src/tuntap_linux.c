@@ -39,7 +39,7 @@ ubond_pkt_t *ubond_tuntap_read(struct tuntap_s *tuntap)
   spair=NULL; // we've used this one now.
   p->p.len=ret; // data length
   p->p.type=UBOND_PKT_DATA;
-
+  p->p.flow_id=0;
   return p;
 }
 
