@@ -48,6 +48,7 @@
 #include "crypto.h"
 #include "includes.h"
 #include "setproctitle.h"
+#include "socks.h"
 #include "tool.h"
 #include "ubond.h"
 #ifdef ENABLE_CONTROL
@@ -335,11 +336,14 @@ inline static void ubond_rtun_tick(ubond_tunnel_t* tun)
 /* Inject the packet to the tuntap device (real network) */
 void ubond_rtun_inject_tuntap(ubond_pkt_t* pkt)
 {
-    UBOND_TAILQ_INSERT_HEAD(&tuntap.sbuf, pkt);
-    /* Send the packet back into the LAN */
-    if (!ev_is_active(&tuntap.io_write)) {
-        ev_io_start(EV_A_ & tuntap.io_write);
-    }
+
+    ubond_tuntap_write(&tuntap, pkt);
+
+    //UBOND_TAILQ_INSERT_HEAD(&tuntap.sbuf, pkt);
+    ///* Send the packet back into the LAN */
+    //if (!ev_is_active(&tuntap.io_write)) {
+    //    ev_io_start(EV_A_ & tuntap.io_write);
+    // }
 }
 
 inline int count_1s(uint64_t b)
@@ -485,6 +489,14 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
             } else if (pkt->p.type == UBOND_PKT_RESEND && tun->status >= UBOND_AUTHOK) {
                 ubond_rtun_tick(tun);
                 ubond_rtun_resend((struct resend_data*)pkt->p.data);
+                ubond_pkt_release(pkt);
+            } else if (pkt->p.type == UBOND_PKT_SOCK_OPEN && tun->status >= UBOND_AUTHOK) {
+                ubond_rtun_tick(tun);
+                ubond_socks_init(pkt);
+                ubond_pkt_release(pkt);
+            } else if (pkt->p.type == UBOND_PKT_SOCK_CLOSE && tun->status >= UBOND_AUTHOK) {
+                ubond_rtun_tick(tun);
+                ubond_socks_term(pkt);
                 ubond_pkt_release(pkt);
             } else {
                 if (tun->status >= UBOND_AUTHOK) {
@@ -1480,7 +1492,6 @@ ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint64_t tun_seqn, int len)
 {
     ubond_pkt_t* pkt;
     pkt = ubond_pkt_get();
-    ubond_buffer_write(&hpsend_buffer, pkt);
 
     struct resend_data* d = (struct resend_data*)(pkt->p.data);
     d->r = 'R';
@@ -1493,6 +1504,7 @@ ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint64_t tun_seqn, int len)
 
     pkt->p.type = UBOND_PKT_RESEND;
     out_resends += len;
+    ubond_buffer_write(&hpsend_buffer, pkt);
 
     log_debug("resend", "Request resend %lu (lost from tunnel %s)", /* t->name,*/ tun_seqn, loss_tun->name);
 }
@@ -1716,6 +1728,7 @@ ubond_rtun_choose(ubond_tunnel_t* rtun)
     if (!spkt)
         return;
 
+    activate_streams();
     if (!ev_is_active(&tuntap.io_read)) {
         ev_io_start(EV_A_ & tuntap.io_read);
     }
@@ -1786,7 +1799,7 @@ ubond_rtun_check_lossy(ubond_tunnel_t* tun)
     if (!keepalive_ok && tun->status == UBOND_AUTHOK) {
         log_info("rtt", "%s keepalive reached threashold, last activity recieved %fs ago", tun->name, now - tun->last_activity);
         tun->status = UBOND_LOSSY;
-//        ubond_rtun_request_resend(tun, tun->seq_last, RESENDBUFSIZE);
+        //        ubond_rtun_request_resend(tun, tun->seq_last, RESENDBUFSIZE);
         // We wont mark the tunnel down yet (hopefully it will come back again, and
         // coming back from a loss is quicker than pulling it down etc. However,
         // here, we fear the worst, and will ask for all packets again. Lets hope
@@ -2100,6 +2113,8 @@ int main(int argc, char** argv)
     ubond_systemd_notify();
 #endif
 
+    UBOND_TAILQ_INIT(&pool);
+
     priv_init(argv, ubond_options.unpriv_user);
     if (ubond_options.change_process_title)
         update_process_title();
@@ -2151,6 +2166,9 @@ int main(int argc, char** argv)
     ev_io_set(&tuntap.io_read, tuntap.fd, EV_READ);
     ev_io_set(&tuntap.io_write, tuntap.fd, EV_WRITE);
     ev_io_start(loop, &tuntap.io_read);
+
+    /* tcp socket init */
+    socks_init();
 
     priv_set_running_state();
 

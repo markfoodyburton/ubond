@@ -20,34 +20,34 @@
 
 #include "includes.h"
 
-#include <sys/ioctl.h>
-#include <sys/wait.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <netdb.h>
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
+#include <netdb.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
-#include <grp.h>
 
 #if defined(HAVE_FREEBSD) || defined(HAVE_OPENBSD)
- #include <signal.h>
+#include <signal.h>
 #endif
 #ifdef HAVE_FREEBSD
- #define _NSIG _SIG_MAXSIG
+#define _NSIG _SIG_MAXSIG
 #elif defined(HAVE_DARWIN)
- #define _NSIG NSIG
+#define _NSIG NSIG
 #endif
 
 #include "privsep.h"
-#include "ubond.h"
 #include "tuntap_generic.h"
+#include "ubond.h"
 
 /*
  * ubond can only go forward in these states; each state should represent
@@ -64,20 +64,21 @@
  * the priv parent restarts itself.
  */
 enum priv_state {
-    STATE_INIT,       /* just started up */
-    STATE_CONFIG,     /* parsing config file for first time */
-    STATE_RUNNING,    /* running and accepting network traffic */
-    STATE_QUIT        /* shutting down */
+    STATE_INIT, /* just started up */
+    STATE_CONFIG, /* parsing config file for first time */
+    STATE_RUNNING, /* running and accepting network traffic */
+    STATE_QUIT /* shutting down */
 };
 
 enum cmd_types {
-    PRIV_OPEN_CONFIG,   /* open config file for reading only */
-    PRIV_INIT_SCRIPT,   /* set allowed status script path */
-    PRIV_OPEN_TUN,      /* open tun/tap device */
-    PRIV_RUN_SCRIPT,    /* run status script */
+    PRIV_OPEN_CONFIG, /* open config file for reading only */
+    PRIV_INIT_SCRIPT, /* set allowed status script path */
+    PRIV_OPEN_TUN, /* open tun/tap device */
+    PRIV_RUN_SCRIPT, /* run status script */
     PRIV_RELOAD_RESOLVER,
     PRIV_GETADDRINFO,
-    PRIV_SET_RUNNING_STATE /* ready for maximum security */
+    PRIV_SET_RUNNING_STATE, /* ready for maximum security */
+    PRIV_SET_TRANSPARENT /* mark a socket transparent */
 };
 
 /* Error message for some communication between processes */
@@ -88,21 +89,20 @@ static volatile pid_t child_pid = -1;
 static volatile sig_atomic_t cur_state = STATE_INIT;
 
 /* No-change runtime file path */
-static char allowed_configfile[MAXPATHLEN] = {0};
+static char allowed_configfile[MAXPATHLEN] = { 0 };
 
-static int root_open_file(char *, int);
-int root_tuntap_open(int tuntapmode, char *devname, int mtu);
-static int root_launch_script(char *, int, char **, char **);
+static int root_open_file(char*, int);
+int root_tuntap_open(int tuntapmode, char* devname, int mtu);
+static int root_launch_script(char*, int, char**, char**);
 static void increase_state(int);
 static void sig_got_chld(int);
 static void sig_pass_to_chld(int);
-static void must_read(int, void *, size_t);
-static void must_write(int, void *, size_t);
-static int  may_read(int, void *, size_t);
+static void must_read(int, void*, size_t);
+static void must_write(int, void*, size_t);
+static int may_read(int, void*, size_t);
 static void reset_default_signals();
 
-int
-priv_init(char *argv[], char *username)
+int priv_init(char* argv[], char* username)
 {
     int i, fd, socks[2], cmd;
     int nullfd;
@@ -112,15 +112,15 @@ priv_init(char *argv[], char *username)
     size_t len;
     size_t hostname_len, servname_len, addrinfo_len;
     char path[MAXPATHLEN];
-    struct passwd *pw = NULL;
+    struct passwd* pw = NULL;
     struct sigaction sa;
     struct addrinfo hints, *res0, *res;
     char hostname[UBOND_MAXHNAMSTR], servname[UBOND_MAXHNAMSTR];
     char *phostname, *pservname;
-    char script_path[MAXPATHLEN] = {0};
+    char script_path[MAXPATHLEN] = { 0 };
     char tuntapname[UBOND_IFNAMSIZ];
-    char **script_argv;
-    char **script_env;
+    char** script_argv;
+    char** script_env;
     char errormessage[ERRMSGSIZ];
     int script_argc;
     struct stat st;
@@ -139,8 +139,7 @@ priv_init(char *argv[], char *username)
         err(1, "socketpair() failed");
 
     /* Safe enough ? */
-    if (username && *username)
-    {
+    if (username && *username) {
         pw = getpwnam(username);
         if (pw == NULL)
             errx(1, "unknown user %s", username);
@@ -150,14 +149,12 @@ priv_init(char *argv[], char *username)
     if (child_pid < 0)
         err(1, "fork() failed");
 
-    if (!child_pid)
-    {
+    if (!child_pid) {
         if (RUNNING_ON_VALGRIND) {
             warnx("running on valgrind, keep privileges");
         } else {
             /* Child - drop privileges and return */
-            if (is_root && pw)
-            {
+            if (is_root && pw) {
                 if (chroot(pw->pw_dir) != 0)
                     err(1, "unable to chroot...");
             }
@@ -166,8 +163,7 @@ priv_init(char *argv[], char *username)
             if (chdir("/") != 0)
                 err(1, "unable to chdir");
 
-            if (is_root && pw)
-            {
+            if (is_root && pw) {
                 if (setgroups(1, &pw->pw_gid) == -1)
                     err(1, "setgroups() failed");
 /* NetBSD does not have thoses */
@@ -212,8 +208,7 @@ priv_init(char *argv[], char *username)
     close(socks[1]);
 
     nullfd = open("/dev/null", O_RDONLY);
-    if (nullfd < 0)
-    {
+    if (nullfd < 0) {
         perror("/dev/null");
         _exit(1);
     }
@@ -225,8 +220,7 @@ priv_init(char *argv[], char *username)
 
     increase_state(STATE_CONFIG);
 
-    while (cur_state < STATE_QUIT)
-    {
+    while (cur_state < STATE_QUIT) {
         if (may_read(socks[0], &cmd, sizeof(cmd)))
             break;
         switch (cmd) {
@@ -240,10 +234,10 @@ priv_init(char *argv[], char *username)
 
             if (cur_state == STATE_CONFIG)
                 strlcpy(allowed_configfile, path, len);
-            if (! *allowed_configfile)
+            if (!*allowed_configfile)
                 fatalx("empty configuration file path");
 
-            fd = root_open_file(allowed_configfile, O_RDONLY|O_NONBLOCK);
+            fd = root_open_file(allowed_configfile, O_RDONLY | O_NONBLOCK);
             send_fd(socks[0], fd);
             if (fd < 0)
                 log_warnx("privsep", "priv_open_config `%s' failed",
@@ -258,8 +252,7 @@ priv_init(char *argv[], char *username)
                 _exit(0);
 
             must_read(socks[0], &tuntapmode, sizeof(tuntapmode));
-            if (tuntapmode != UBOND_TUNTAPMODE_TUN &&
-                    tuntapmode != UBOND_TUNTAPMODE_TAP)
+            if (tuntapmode != UBOND_TUNTAPMODE_TUN && tuntapmode != UBOND_TUNTAPMODE_TAP)
                 _exit(0);
 
             must_read(socks[0], &len, sizeof(len));
@@ -278,8 +271,7 @@ priv_init(char *argv[], char *username)
 
             /* see tuntap_*.c . That's where this is defined. */
             fd = root_tuntap_open(tuntapmode, tuntapname, mtu);
-            if (fd < 0)
-            {
+            if (fd < 0) {
                 len = 0;
                 must_write(socks[0], &len, sizeof(len));
                 break;
@@ -311,18 +303,17 @@ priv_init(char *argv[], char *username)
              * basically, the script must be 0700 owned by root
              */
             *errormessage = '\0';
-            if (stat(path, &st) < 0)
-            {
+            if (stat(path, &st) < 0) {
                 snprintf(errormessage, ERRMSGSIZ, "Unable to open file %s:%s",
-                         path, strerror(errno));
-            } else if (st.st_mode & (S_IRWXG|S_IRWXO)) {
+                    path, strerror(errno));
+            } else if (st.st_mode & (S_IRWXG | S_IRWXO)) {
                 snprintf(errormessage, ERRMSGSIZ,
-                         "%s is group/other accessible",
-                         path);
+                    "%s is group/other accessible",
+                    path);
             } else if (!(st.st_mode & S_IXUSR)) {
                 snprintf(errormessage, ERRMSGSIZ,
-                         "%s is not executable",
-                         path);
+                    "%s is not executable",
+                    path);
             } else {
                 strlcpy(script_path, path, len);
             }
@@ -364,16 +355,14 @@ priv_init(char *argv[], char *username)
                 must_write(socks[0], &addrinfo_len, sizeof(addrinfo_len));
             } else {
                 res = res0;
-                while (res)
-                {
+                while (res) {
                     addrinfo_len++;
                     res = res->ai_next;
                 }
                 must_write(socks[0], &addrinfo_len, sizeof(addrinfo_len));
 
                 res = res0;
-                while (res)
-                {
+                while (res) {
                     must_write(socks[0], &res->ai_flags, sizeof(res->ai_flags));
                     must_write(socks[0], &res->ai_family, sizeof(res->ai_family));
                     must_write(socks[0], &res->ai_socktype, sizeof(res->ai_socktype));
@@ -391,18 +380,18 @@ priv_init(char *argv[], char *username)
             if (script_argc <= 0)
                 _exit(0);
 
-            if ((script_argv = calloc(script_argc + 1, sizeof(char *))) == NULL)
+            if ((script_argv = calloc(script_argc + 1, sizeof(char*))) == NULL)
                 _exit(0);
 
             /* read script argumuments */
-            for(i = 0; i < script_argc; i++) {
+            for (i = 0; i < script_argc; i++) {
                 must_read(socks[0], &len, sizeof(len));
                 if (len <= 0)
                     _exit(0);
                 if ((script_argv[i] = malloc(len)) == NULL)
                     _exit(0);
                 must_read(socks[0], script_argv[i], len);
-                script_argv[i][len-1] = '\0';
+                script_argv[i][len - 1] = '\0';
             }
             script_argv[i] = NULL;
 
@@ -410,9 +399,9 @@ priv_init(char *argv[], char *username)
             must_read(socks[0], &env_len, sizeof(env_len));
             if (env_len <= 0)
                 _exit(0);
-            if ((script_env = calloc(env_len + 1, sizeof(char *))) == NULL)
+            if ((script_env = calloc(env_len + 1, sizeof(char*))) == NULL)
                 _exit(0);
-            for(i = 0; i < env_len; i++) {
+            for (i = 0; i < env_len; i++) {
                 must_read(socks[0], &len, sizeof(len));
                 if (len <= 0)
                     _exit(0);
@@ -422,16 +411,16 @@ priv_init(char *argv[], char *username)
                 script_env[i][len - 1] = '\0';
             }
 
-            if (! *script_path)
+            if (!*script_path)
                 i = -1;
             else
                 i = root_launch_script(script_path,
                     script_argc, script_argv, script_env);
             must_write(socks[0], &i, sizeof(i));
-            for(i = 0; i < script_argc && script_argv[i]; i++)
+            for (i = 0; i < script_argc && script_argv[i]; i++)
                 free(script_argv[i]);
             free(script_argv);
-            for(i = 0; i < env_len && script_env[i]; i++)
+            for (i = 0; i < env_len && script_env[i]; i++)
                 free(script_env[i]);
             free(script_env);
             break;
@@ -449,7 +438,48 @@ priv_init(char *argv[], char *username)
             }
 #endif
             break;
+        case PRIV_SET_TRANSPARENT: {
 
+            char* bindhost = "0.0.0.0";
+            int serverfd = 0;
+            int bindport;
+            must_read(socks[0], &bindport, sizeof(bindport));
+            log_info("privsep", "creating TCP tunnel on port %d", bindport);
+
+            /* Create our server socket */
+            if ((serverfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
+                log_warn("privsep", "Could not create socket");
+            }
+
+            struct sockaddr_in addr;
+            bzero(&addr, sizeof(addr));
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(bindport);
+            if (inet_pton(AF_INET, bindhost, &addr.sin_addr.s_addr) <= 0) {
+                log_warn("privsep", "Could not parse Host");
+            }
+
+            int on = 1;
+            if (setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) == -1) {
+                log_warn("privsep", "can't set reuseaddr\n");
+            }
+            if (setsockopt(serverfd, SOL_IP, IP_TRANSPARENT, &on, sizeof(on)) == -1) {
+                log_warn("privsep", "Can't set Transpaent on socket ");
+            }
+            //priv_set_socket_transparent(serverfd); // priveledged instruction
+
+            if (bind(serverfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+                log_warn("privsep","Could not bind our socket");
+            }
+
+            if (listen(serverfd, 0) < 0) {
+                log_warn("privsep","listen failed");
+            }
+            send_fd(socks[0], fd);
+            if (fd >= 0)
+                close(fd);
+            break;
+        }
         default:
             errx(1, "unknown command %d", cmd);
             break;
@@ -461,7 +491,7 @@ priv_init(char *argv[], char *username)
 }
 
 static int
-root_open_file(char *path, int flags)
+root_open_file(char* path, int flags)
 {
     /* must not start with | */
     if (path[0] == '|')
@@ -470,13 +500,13 @@ root_open_file(char *path, int flags)
 }
 
 static int
-root_launch_script(char *setup_script, int argc, char **argv, char **env)
+root_launch_script(char* setup_script, int argc, char** argv, char** env)
 {
     sigset_t oldmask, mask;
     int pid, status = -1;
     int i;
-    char **newargs;
-    char **envp = env;
+    char** newargs;
+    char** envp = env;
 
     sigemptyset(&mask);
     sigaddset(&mask, SIGCHLD);
@@ -484,28 +514,27 @@ root_launch_script(char *setup_script, int argc, char **argv, char **env)
 
     /* try to launch network script */
     pid = fork();
-    if (pid == 0)
-    {
+    if (pid == 0) {
         /* Reset all signals is required because after fork
          * the child process inherits all signal dispositions
          * of the parent
          */
         reset_default_signals();
         closefrom(3);
-        newargs = calloc(argc + 2, sizeof(char *));
-        if (! newargs)
+        newargs = calloc(argc + 2, sizeof(char*));
+        if (!newargs)
             err(1, "memory allocation failed");
         newargs[0] = setup_script;
-        for(i = 0; i < argc; i++)
-            newargs[i+1] = argv[i];
-        newargs[i+1] = NULL;
+        for (i = 0; i < argc; i++)
+            newargs[i + 1] = argv[i];
+        newargs[i + 1] = NULL;
 
         while (*envp) {
             putenv(*envp);
             envp++;
         }
 
-        if(chdir("/") != 0)
+        if (chdir("/") != 0)
             errx(1, "chdir failed.");
         execv(setup_script, newargs);
         _exit(1);
@@ -543,8 +572,7 @@ increase_state(int state)
 }
 
 /* Open ubond config file for reading */
-int
-priv_open_config(char *config_path)
+int priv_open_config(char* config_path)
 {
     int cmd, fd;
     size_t len;
@@ -567,7 +595,7 @@ priv_open_config(char *config_path)
 /* Open tun from unpriviled code
  * Scope: public
  */
-int priv_open_tun(int tuntapmode, char *devname, int mtu)
+int priv_open_tun(int tuntapmode, char* devname, int mtu)
 {
     int cmd, fd;
     size_t len;
@@ -590,33 +618,30 @@ int priv_open_tun(int tuntapmode, char *devname, int mtu)
     must_write(priv_fd, &mtu, sizeof(mtu));
 
     must_read(priv_fd, &len, sizeof(len));
-    if (len > 0 && len < UBOND_IFNAMSIZ && devname != NULL)
-    {
+    if (len > 0 && len < UBOND_IFNAMSIZ && devname != NULL) {
         must_read(priv_fd, devname, len);
-        devname[len-1] = '\0';
+        devname[len - 1] = '\0';
         fd = receive_fd(priv_fd);
     } else if (len <= 0) {
         fd = len;
     } else {
         /* Too big ! */
         errx(1, "%s: device name returned by privileged "
-             "service is too long.",
-             "priv_open_tun");
+                "service is too long.",
+            "priv_open_tun");
     }
     return fd;
 }
 
-
 /* Name/service to address translation.  Response is placed into addr, and
  * the length is returned (zero on error) */
-int
-priv_getaddrinfo(char *host, char *serv, struct addrinfo **addrinfo,
-                 struct addrinfo *hints)
+int priv_getaddrinfo(char* host, char* serv, struct addrinfo** addrinfo,
+    struct addrinfo* hints)
 {
     char hostcpy[UBOND_MAXHNAMSTR], servcpy[UBOND_MAXHNAMSTR];
     int cmd;
     size_t i, hostname_len, servname_len, ret_len;
-    struct addrinfo *new, *last = NULL;
+    struct addrinfo* new, *last = NULL;
 
     if (priv_fd < 0)
         errx(1, "%s: called from privileged portion", "priv_getaddrinfo");
@@ -651,15 +676,14 @@ priv_getaddrinfo(char *host, char *serv, struct addrinfo **addrinfo,
     if (!ret_len)
         return 0;
 
-    for (i=0; i < ret_len; i++)
-    {
+    for (i = 0; i < ret_len; i++) {
         new = malloc(sizeof(struct addrinfo));
         must_read(priv_fd, &new->ai_flags, sizeof(new->ai_flags));
         must_read(priv_fd, &new->ai_family, sizeof(new->ai_family));
         must_read(priv_fd, &new->ai_socktype, sizeof(new->ai_socktype));
         must_read(priv_fd, &new->ai_protocol, sizeof(new->ai_protocol));
         must_read(priv_fd, &new->ai_addrlen, sizeof(new->ai_addrlen));
-        new->ai_addr = (struct sockaddr *)malloc(new->ai_addrlen);
+        new->ai_addr = (struct sockaddr*)malloc(new->ai_addrlen);
         must_read(priv_fd, new->ai_addr, new->ai_addrlen);
         new->ai_canonname = NULL;
         new->ai_next = NULL;
@@ -675,8 +699,7 @@ priv_getaddrinfo(char *host, char *serv, struct addrinfo **addrinfo,
 }
 
 /* init script path */
-int
-priv_init_script(char *path)
+int priv_init_script(char* path)
 {
     int cmd;
     size_t len;
@@ -684,7 +707,7 @@ priv_init_script(char *path)
 
     if (priv_fd < 0)
         errx(1, "%s: called from privileged portion",
-             "priv_init_script");
+            "priv_init_script");
 
     cmd = PRIV_INIT_SCRIPT;
     must_write(priv_fd, &cmd, sizeof(cmd));
@@ -694,18 +717,16 @@ priv_init_script(char *path)
 
     must_read(priv_fd, &len, sizeof(len));
 
-    if (len <= 0)
-    {
+    if (len <= 0) {
         errx(1, "priv_init_script: invalid answer from server");
     } else if (len > ERRMSGSIZ) {
         log_warnx("privsep", "priv_init_script: error message truncated");
         len = ERRMSGSIZ;
     }
     must_read(priv_fd, errormessage, len);
-    errormessage[len-1] = 0;
+    errormessage[len - 1] = 0;
 
-    if (*errormessage)
-    {
+    if (*errormessage) {
         log_warnx("privsep", "error from priv server: %s",
             errormessage);
         return -1;
@@ -714,8 +735,7 @@ priv_init_script(char *path)
 }
 
 /* run script */
-int
-priv_run_script(int argc, char **argv, int env_len, char **env)
+int priv_run_script(int argc, char** argv, int env_len, char** env)
 {
     int cmd, retval;
     int i;
@@ -723,20 +743,19 @@ priv_run_script(int argc, char **argv, int env_len, char **env)
 
     if (priv_fd < 0)
         errx(1, "%s: called from privileged portion",
-             "priv_run_script");
+            "priv_run_script");
 
     cmd = PRIV_RUN_SCRIPT;
     must_write(priv_fd, &cmd, sizeof(cmd));
 
     must_write(priv_fd, &argc, sizeof(argc));
-    for (i=0; i < argc; i++)
-    {
+    for (i = 0; i < argc; i++) {
         len = strlen(argv[i]) + 1;
         must_write(priv_fd, &len, sizeof(len));
         must_write(priv_fd, argv[i], len);
     }
     must_write(priv_fd, &env_len, sizeof(env_len));
-    for (i=0; i < env_len; i++) {
+    for (i = 0; i < env_len; i++) {
         len = strlen(env[i]) + 1;
         must_write(priv_fd, &len, sizeof(len));
         must_write(priv_fd, env[i], len);
@@ -751,20 +770,31 @@ void priv_reload_resolver(void)
     int cmd;
     if (priv_fd < 0)
         errx(1, "%s: called from privileged portion",
-             "priv_reload_resolver");
+            "priv_reload_resolver");
     cmd = PRIV_RELOAD_RESOLVER;
     must_write(priv_fd, &cmd, sizeof(cmd));
 }
 
-/* Child can signal that its initial parsing is done, so that parent
- * can revoke further logfile permissions.  This call only works once. */
-void
-priv_set_running_state(void)
+int priv_set_socket_transparent(int bindport)
 {
     int cmd;
     if (priv_fd < 0)
         errx(1, "%s: called from privileged portion",
-             "priv_set_running_state");
+            "priv_set_socket_transparent");
+    cmd = PRIV_SET_TRANSPARENT;
+    must_write(priv_fd, &cmd, sizeof(cmd));
+    must_write(priv_fd, &bindport, sizeof(bindport));
+    return receive_fd(priv_fd);
+}
+
+/* Child can signal that its initial parsing is done, so that parent
+ * can revoke further logfile permissions.  This call only works once. */
+void priv_set_running_state(void)
+{
+    int cmd;
+    if (priv_fd < 0)
+        errx(1, "%s: called from privileged portion",
+            "priv_set_running_state");
     cmd = PRIV_SET_RUNNING_STATE;
     must_write(priv_fd, &cmd, sizeof(cmd));
 }
@@ -775,7 +805,7 @@ static void
 sig_got_chld(int sig)
 {
     int save_errno = errno;
-    pid_t    pid;
+    pid_t pid;
 
     do {
         pid = waitpid(WAIT_ANY, NULL, WNOHANG);
@@ -789,8 +819,7 @@ static void
 sig_pass_to_chld(int sig)
 {
     int save_errno = errno;
-    if (child_pid != -1)
-    {
+    if (child_pid != -1) {
         kill(child_pid, sig);
         errno = save_errno;
     }
@@ -798,13 +827,12 @@ sig_pass_to_chld(int sig)
 
 /* Read all data or return 1 for error.  */
 static int
-may_read(int fd, void *buf, size_t n)
+may_read(int fd, void* buf, size_t n)
 {
-    char *s = buf;
+    char* s = buf;
     ssize_t res, pos = 0;
 
-    while (n > pos)
-    {
+    while (n > pos) {
         res = read(fd, s + pos, n - pos);
         switch (res) {
         case -1:
@@ -822,13 +850,12 @@ may_read(int fd, void *buf, size_t n)
 /* Read data with the assertion that it all must come through, or
  * else abort the process.  Based on atomicio() from openssh. */
 static void
-must_read(int fd, void *buf, size_t n)
+must_read(int fd, void* buf, size_t n)
 {
-    char *s = buf;
+    char* s = buf;
     ssize_t res, pos = 0;
 
-    while (n > pos)
-    {
+    while (n > pos) {
         res = read(fd, s + pos, n - pos);
         switch (res) {
         case -1:
@@ -845,13 +872,12 @@ must_read(int fd, void *buf, size_t n)
 /* Write data with the assertion that it all has to be written, or
  * else abort the process.  Based on atomicio() from openssh. */
 static void
-must_write(int fd, void *buf, size_t n)
+must_write(int fd, void* buf, size_t n)
 {
-    char *s = buf;
+    char* s = buf;
     ssize_t res, pos = 0;
 
-    while (n > pos)
-    {
+    while (n > pos) {
         res = write(fd, s + pos, n - pos);
         switch (res) {
         case -1:

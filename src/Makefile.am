@@ -16,6 +16,7 @@ ubond_SOURCES = \
     crypto.c crypto.h \
     log.c log.h \
     reorder.h reorder.c \
+    socks.h socks.c \    
     timestamp.h timestamp.c \
     tuntap_generic.c tuntap_generic.h \
     ubond.c ubond.h

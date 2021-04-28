@@ -111,6 +111,7 @@ struct ubond_options_s
     int root_allowed;
     uint32_t reorder_buffer_size;
     uint32_t fallback_available;
+    uint32_t tcp_socket;
 };
 
 struct ubond_status_s
@@ -222,8 +223,11 @@ void ubond_rtun_status_down(ubond_tunnel_t *t);
 #ifdef HAVE_FILTERS
 int ubond_filters_add(const struct bpf_program *filter, ubond_tunnel_t *tun);
 ubond_tunnel_t *ubond_filters_choose(uint32_t pktlen, const u_char *pktdata);
-void ubond_send_buffer_write(ubond_pkt_t *p);
+//void ubond_send_buffer_write(ubond_pkt_t *p);
 #endif
+
+void ubond_buffer_write(ubond_pkt_list_t* buffer, ubond_pkt_t* p);
+int ubond_pkt_list_is_full(ubond_pkt_list_t* list);
 
 #include "privsep.h"
 #include "log.h"
