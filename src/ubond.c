@@ -92,7 +92,7 @@ double bandwidth = 0;
 uint64_t out_resends = 0;
 ev_tstamp resend_at = 0;
 //double srtt;
-double srtt_min = 1;
+double srtt_min = 0;
 //double srtt_max=1;
 
 ubond_pkt_list_t pool;
@@ -946,7 +946,7 @@ ubond_rtun_new(const char* name,
     new->srtt_av = 40;
     new->srtt_d = 0;
     new->srtt_c = 0;
-    new->srtt_min = 10000;
+    new->srtt_min = 0;
     new->srtt_reductions = 0;
     new->seq_last = 0;
     new->seq_vect = (uint64_t)-1;
@@ -1660,10 +1660,8 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
     bandwidth = ((bandwidth * 9.0) + (((double)bandwidthdata / 128.0) / diff)) / 10.0;
     bandwidthdata = 0;
 
-    double new_srtt = 0;
     ubond_tunnel_t* t;
     int tuns = 0;
-    int set_srtt_min = 0;
     LIST_FOREACH(t, &rtuns, entries)
     {
         if (t->status >= UBOND_AUTHOK) {
@@ -1673,29 +1671,21 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
                 t->permitted += (double)t->quota * diff * 128.0; // listed in kbps (1024/8)
             }
 
-            if (t->srtt_c > 0) {
-                // calc the srtt average...
+            if (t->srtt_c > 2) {
                 t->srtt = (t->srtt_d / t->srtt_c);
-                if (t->srtt > t->srtt_av)
-                    t->srtt_av = t->srtt;
-                else
-                    t->srtt_av = ((t->srtt_av * 9) + t->srtt) / 10;
 
-                if (t->srtt < t->srtt_min && t->srtt_c > 2) {
+                if (t->srtt_min==0 || t->srtt < t->srtt_min) {
                     t->srtt_min = t->srtt;
-                } else {
-                    t->srtt_min = ((t->srtt_min * 999) + t->srtt_av) / 1000;
                 }
-                if (!set_srtt_min || t->srtt < srtt_min) {
+                if (srtt_min==0 || t->srtt < srtt_min){
                     srtt_min = t->srtt;
-                    set_srtt_min = 1;
                 }
                 t->srtt_d = 0;
                 t->srtt_c = 0;
             } else {
-                t->srtt = srtt_min;
-                t->srtt_av = ((t->srtt_av * 9) + t->srtt) / 10;
+                t->srtt = t->srtt_min;
             }
+            t->srtt_av = ((t->srtt_av * 9.0) + t->srtt) / 10.0;
 
             // calc measured bandwidth for INCOMMING
             t->bandwidth_measured = (t->bm_data / 128) * INVERSEBWCALCTIME; // kbits/sec
