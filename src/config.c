@@ -24,37 +24,36 @@
  */
 #include <ifaddrs.h>
 
-#include "includes.h"
-#include "ubond.h"
-#include "configlib.h"
-#include "tool.h"
 #include "crypto.h"
+#include "includes.h"
+#include "tool.h"
 #include "tuntap_generic.h"
+#include "ubond.h"
 
-extern char *status_command;
+#include "configlib.h"
+
+extern char* status_command;
 extern struct ubond_options_s ubond_options;
 extern struct ubond_filters_s ubond_filters;
 extern struct tuntap_s tuntap;
 
-char *ip_from_if(char *ifname);
+char* ip_from_if(char* ifname);
 // we'll declair this here, so that any device name used instead of an IP
 // address gets translated before we go anywhere else...
-
 
 /* Config file reading / re-read.
  * config_file_fd: fd opened in priv_open_config
  * first_time: set to 0 for re-read, or 1 for initial configuration
  */
-int
-ubond_config(int config_file_fd, int first_time)
+int ubond_config(int config_file_fd, int first_time)
 {
     config_t *config, *work;
-    ubond_tunnel_t *tmptun;
-    char *tmp = NULL;
-    char *mode = NULL;
-    char *lastSection = NULL;
-    char *tundevname = NULL;
-    char *password = NULL;
+    ubond_tunnel_t* tmptun;
+    char* tmp = NULL;
+    char* mode = NULL;
+    char* lastSection = NULL;
+    char* tundevname = NULL;
+    char* password = NULL;
     uint32_t tun_mtu = 0;
 
     uint32_t default_timeout = 60;
@@ -62,30 +61,27 @@ ubond_config(int config_file_fd, int first_time)
     uint32_t cleartext_data = 0;
     uint32_t static_tunnel = 0;
     uint32_t fallback_only = 0;
+    uint32_t tcp_socket = 1211;
 
     ubond_options.fallback_available = 0;
 
     /* reset all bpf filters on every interface */
 #ifdef HAVE_FILTERS
     struct bpf_program filter;
-    pcap_t *pcap_dead_p = pcap_open_dead(DLT_RAW, DEFAULT_MTU);
+    pcap_t* pcap_dead_p = pcap_open_dead(DLT_RAW, DEFAULT_MTU);
     memset(&ubond_filters, 0, sizeof(ubond_filters));
 #endif
 
     work = config = _conf_parseConfig(config_file_fd);
-    if (! config)
+    if (!config)
         goto error;
 
-    while (work)
-    {
-        if ((work->section != NULL) && !mystr_eq(work->section, lastSection))
-        {
+    while (work) {
+        if ((work->section != NULL) && !mystr_eq(work->section, lastSection)) {
             lastSection = work->section;
-            if (mystr_eq(lastSection, "general"))
-            {
+            if (mystr_eq(lastSection, "general")) {
                 /* Thoses settings can only by set at start time */
-                if (first_time)
-                {
+                if (first_time) {
                     _conf_set_str_from_conf(
                         config, lastSection, "statuscommand", &status_command, NULL,
                         NULL, 0);
@@ -130,6 +126,9 @@ ubond_config(int config_file_fd, int first_time)
                             sizeof(ubond_options.control_bind_port));
                         free(tmp);
                     }
+                    _conf_set_uint_from_conf(
+                        config, lastSection, "tcp_socket", &tcp_socket, 1211, NULL, 0);
+                    ubond_options.tcp_socket = tcp_socket;
                 }
                 /* This is important to be parsed every time because
                  * it's used later in the configuration parsing
@@ -170,14 +169,14 @@ ubond_config(int config_file_fd, int first_time)
                 }
 
                 _conf_set_str_from_conf(
-                  config, lastSection, "reorder_buffer", &tmp, NULL, NULL, 0);
+                    config, lastSection, "reorder_buffer", &tmp, NULL, NULL, 0);
                 if (tmp) {
-                  ubond_reorder_reset();
-                  if (strcmp(tmp, "yes") == 0) {
-                    ubond_reorder_enable();
-                  } else {
-                    log_warnx("config", "Reorder buffer disabled");
-                  }
+                    ubond_reorder_reset();
+                    if (strcmp(tmp, "yes") == 0) {
+                        ubond_reorder_enable();
+                    } else {
+                        log_warnx("config", "Reorder buffer disabled");
+                    }
                 }
 
                 /* Tunnel configuration */
@@ -251,20 +250,19 @@ ubond_config(int config_file_fd, int first_time)
                     ubond_options.mtu = tun_mtu;
                 }
             } else if (strncmp(lastSection, "filters", 7) != 0) {
-                char *bindaddr;
-                char *bindport;
-                char *binddev;
+                char* bindaddr;
+                char* bindport;
+                char* binddev;
                 uint32_t bindfib = 0;
-                char *dstaddr;
-                char *dstport;
+                char* dstaddr;
+                char* dstport;
                 uint32_t bwlimit = 0;
                 uint32_t quota = 0;
                 uint32_t reorder_length = 1;
                 uint32_t timeout = 30;
                 int create_tunnel = 1;
 
-                if (default_server_mode)
-                {
+                if (default_server_mode) {
                     _conf_set_str_from_conf(
                         config, lastSection, "bindhost", &bindaddr, NULL,
                         NULL, 0);
@@ -287,7 +285,7 @@ ubond_config(int config_file_fd, int first_time)
                     _conf_set_str_from_conf(
                         config, lastSection, "bindport", &bindport, NULL,
                         NULL, 0);
-                     _conf_set_uint_from_conf(
+                    _conf_set_uint_from_conf(
                         config, lastSection, "bindfib", &bindfib, 0,
                         NULL, 0);
                     _conf_set_str_from_conf(
@@ -298,9 +296,8 @@ ubond_config(int config_file_fd, int first_time)
                         "No remote port specified.\n", 1);
                 }
 
-                bindaddr=ip_from_if(bindaddr);
-                
-                
+                bindaddr = ip_from_if(bindaddr);
+
                 _conf_set_str_from_conf(
                     config, lastSection, "binddev", &binddev, NULL, NULL, 0);
                 _conf_set_uint_from_conf(
@@ -327,18 +324,12 @@ ubond_config(int config_file_fd, int first_time)
                 }
                 LIST_FOREACH(tmptun, &rtuns, entries)
                 {
-                    if (mystr_eq(lastSection, tmptun->name))
-                    {
+                    if (mystr_eq(lastSection, tmptun->name)) {
                         log_info("config",
                             "%s restart for configuration reload",
-                              tmptun->name);
-                        if ((! mystr_eq(tmptun->bindaddr, bindaddr)) ||
-                                (! mystr_eq(tmptun->bindport, bindport)) ||
-                                (tmptun->bindfib != bindfib) ||
-                                (! mystr_eq(tmptun->destaddr, dstaddr)) ||
-                                (! mystr_eq(tmptun->destport, dstport)) ||
-                                (! mystr_eq(tmptun->binddev, binddev))) {
-                                ubond_rtun_status_down(tmptun);
+                            tmptun->name);
+                        if ((!mystr_eq(tmptun->bindaddr, bindaddr)) || (!mystr_eq(tmptun->bindport, bindport)) || (tmptun->bindfib != bindfib) || (!mystr_eq(tmptun->destaddr, dstaddr)) || (!mystr_eq(tmptun->destport, dstport)) || (!mystr_eq(tmptun->binddev, binddev))) {
+                            ubond_rtun_status_down(tmptun);
                         }
 
                         if (bindaddr) {
@@ -359,31 +350,27 @@ ubond_config(int config_file_fd, int first_time)
                         if (dstport) {
                             strlcpy(tmptun->destport, dstport, sizeof(tmptun->destport));
                         }
-                        if (tmptun->fallback_only != fallback_only)
-                        {
+                        if (tmptun->fallback_only != fallback_only) {
                             log_info("config", "%s fallback_only changed from %d to %d",
                                 tmptun->name, tmptun->fallback_only, fallback_only);
                             tmptun->fallback_only = fallback_only;
                         }
-                        if (tmptun->bandwidth_max != bwlimit)
-                        {
-                          log_info("config", "%s bandwidth changed from %lu to %u",
+                        if (tmptun->bandwidth_max != bwlimit) {
+                            log_info("config", "%s bandwidth changed from %lu to %u",
                                 tmptun->name, tmptun->bandwidth_max, bwlimit);
-                            if (bwlimit==0) {
-                              bwlimit=10000;
+                            if (bwlimit == 0) {
+                                bwlimit = 10000;
                             }
                             tmptun->bandwidth_max = bwlimit;
-//                            tmptun->bandwidth = bwlimit;
+                            //                            tmptun->bandwidth = bwlimit;
                         }
-                        if (tmptun->quota != quota)
-                        {
-                          log_info("config", "%s quota changed from %d to %d",
+                        if (tmptun->quota != quota) {
+                            log_info("config", "%s quota changed from %d to %d",
                                 tmptun->name, tmptun->quota, quota);
                             tmptun->quota = quota;
                         }
-                        if (tmptun->reorder_length_preset != reorder_length)
-                        {
-                          log_info("config", "%s reorder length changed from %d to %d",
+                        if (tmptun->reorder_length_preset != reorder_length) {
+                            log_info("config", "%s reorder length changed from %d to %d",
                                 tmptun->name, tmptun->reorder_length_preset, reorder_length);
                             tmptun->reorder_length_preset = reorder_length;
                         }
@@ -392,8 +379,7 @@ ubond_config(int config_file_fd, int first_time)
                     }
                 }
 
-                if (create_tunnel)
-                {
+                if (create_tunnel) {
                     log_info("config", "%s tunnel added", lastSection);
                     ubond_rtun_new(
                         lastSection, bindaddr, bindport, binddev, bindfib, dstaddr, dstport,
@@ -417,26 +403,21 @@ ubond_config(int config_file_fd, int first_time)
     }
 
     /* Ok, let's delete old tunnels */
-    if (! first_time)
-    {
+    if (!first_time) {
         LIST_FOREACH(tmptun, &rtuns, entries)
         {
             int found_in_config = 0;
 
             work = config;
-            while (work)
-            {
-                if (work->conf && work->section &&
-                        mystr_eq(work->section, tmptun->name))
-                {
+            while (work) {
+                if (work->conf && work->section && mystr_eq(work->section, tmptun->name)) {
                     found_in_config = 1;
                     break;
                 }
                 work = work->next;
             }
 
-            if (! found_in_config)
-            {
+            if (!found_in_config) {
                 log_info("config", "%s tunnel removed", tmptun->name);
                 ubond_rtun_drop(tmptun);
             }
@@ -446,18 +427,18 @@ ubond_config(int config_file_fd, int first_time)
 #ifdef HAVE_FILTERS
     work = config;
     int found_in_config = 0;
-    while (work)
-    {
-        if (work->section != NULL &&
-                strncmp(work->section, "filters", 7) == 0) {
+    while (work) {
+        if (work->section != NULL && strncmp(work->section, "filters", 7) == 0) {
             memset(&filter, 0, sizeof(filter));
             if (pcap_compile(pcap_dead_p, &filter, work->conf->val,
-                    1, PCAP_NETMASK_UNKNOWN) != 0) {
+                    1, PCAP_NETMASK_UNKNOWN)
+                != 0) {
                 log_warnx("config", "invalid filter %s = %s: %s",
                     work->conf->var, work->conf->val, pcap_geterr(pcap_dead_p));
             } else {
                 found_in_config = 0;
-                LIST_FOREACH(tmptun, &rtuns, entries) {
+                LIST_FOREACH(tmptun, &rtuns, entries)
+                {
                     if (strcmp(work->conf->var, tmptun->name) == 0) {
                         if (ubond_filters_add(&filter, tmptun) != 0) {
                             log_warnx("config", "%s filter %s error: too many filters",
@@ -494,38 +475,33 @@ error:
     return 1;
 }
 
-
 /* This is a filter function, it takes an name, if the name turns out to be an
  * interface, it translates it to it's IP address,
  * the resulting filtered name is returned (whether it has matched an interface
  * or not */
-char *ip_from_if(char *ifname) 
+char* ip_from_if(char* ifname)
 {
-  
+
     struct ifaddrs *ifaddr, *ifa;
     int s;
     char host[NI_MAXHOST];
-    
-    if (getifaddrs(&ifaddr) == -1) 
-    {
-      log_warn(NULL, "unable to collect ifaddrs");
-      return ifname;
+
+    if (getifaddrs(&ifaddr) == -1) {
+        log_warn(NULL, "unable to collect ifaddrs");
+        return ifname;
     }
 
-
-    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) 
-    {
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
         if (ifa->ifa_addr == NULL)
-            continue;  
+            continue;
 
-        s=getnameinfo(ifa->ifa_addr,sizeof(struct sockaddr_in),host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
+        s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
 
-        if((strcmp(ifa->ifa_name,ifname)==0)&&(ifa->ifa_addr->sa_family==AF_INET))
-        {
-            if (s == 0)
-            {
-              if (ifname) free(ifname);
-              ifname = strdup(host);
+        if ((strcmp(ifa->ifa_name, ifname) == 0) && (ifa->ifa_addr->sa_family == AF_INET)) {
+            if (s == 0) {
+                if (ifname)
+                    free(ifname);
+                ifname = strdup(host);
             }
         }
     }

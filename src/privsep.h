@@ -21,6 +21,7 @@ void priv_set_running_state(void);
 int
 priv_getaddrinfo(char *host, char *serv, struct addrinfo **addrinfo,
                  struct addrinfo *hints);
+int priv_set_socket_transparent(int bindport);
 
 void send_fd(int sock, int fd);
 int receive_fd(int sock);

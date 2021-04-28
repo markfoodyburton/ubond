@@ -41,6 +41,7 @@
 #include "log.h"
 #include "pkt.h"
 #include "ubond.h"
+#include "socks.h"
 
 /* The reorder buffer data structure itself */
 struct ubond_reorder_buffer {
@@ -239,7 +240,8 @@ void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     }
 
     if (!b->enabled || !pkt->p.reorder || !pkt->p.data_seq /* || pkt->p.data_seq==b->min_seqn*/) {
-        ubond_rtun_inject_tuntap(pkt); // this will deliver and free the packet
+        if (!ubond_stream_write(pkt))
+            ubond_rtun_inject_tuntap(pkt); // this will deliver and free the packet
         // Deliver non reordable packets ASAP, as that shoudn't effect a tcp algorithm
         b->delivered++;
         return;
@@ -358,9 +360,7 @@ void ubond_reorder_drain()
   (e.g. that could be found in the pkt list)
 */
 
-    while (!UBOND_TAILQ_EMPTY(&b->list) && (aoldereqb(UBOND_TAILQ_LAST(&b->list)->p.data_seq, b->min_seqn)
-                                               || (UBOND_TAILQ_LAST(&b->list)->timestamp < cut)
-                                               || (b->list_size > b->target_len))) {
+    while (!UBOND_TAILQ_EMPTY(&b->list) && (aoldereqb(UBOND_TAILQ_LAST(&b->list)->p.data_seq, b->min_seqn) || (UBOND_TAILQ_LAST(&b->list)->timestamp < cut) || (b->list_size > b->target_len))) {
 
         //    if (!aoldereqb(UBOND_TAILQ_LAST(&b->list)->p.data_seq, b->min_seqn) ) {
         //      log_debug("loss","Clearing: list size %d target %d last %f cut %f (%fs ago now: %fs)  outstanding resends %lu", b->list_size, b->target_len, UBOND_TAILQ_LAST(&b->list)->timestamp, cut, t, now,  out_resends);
@@ -372,7 +372,8 @@ void ubond_reorder_drain()
         drain_cnt++;
 
         if (l->p.data_seq == b->min_seqn) { // normal delivery
-            ubond_rtun_inject_tuntap(l);
+            if (!ubond_stream_write(l))
+                ubond_rtun_inject_tuntap(l);
             b->delivered++;
             log_debug("reorder", "Delivered data seq %lu (tun seq %lu)", l->p.data_seq, l->p.tun_seq);
             b->min_seqn = l->p.data_seq + 1;
