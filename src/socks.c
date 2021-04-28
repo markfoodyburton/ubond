@@ -92,27 +92,31 @@ static void ubond_stream_close(stream_t* s, int final)
         ubond_buffer_write(&hpsend_buffer, pkt);
     }
 }
-
+int paused = 0;
 void activate_streams()
 {
-    if (ubond_pkt_list_is_full(&send_buffer))
+    if (paused==0 || ubond_pkt_list_is_full(&send_buffer))
         return;
     else {
-        stream_t* l;
+        //printf("Activate\n");
+        stream_t *l;
         UBOND_TAILQ_FOREACH(l, &active)
         {
             ev_io_start(EV_DEFAULT_ &l->io_read);
         }
+        paused = 0;
     }
 }
 
 void pause_streams()
 {
-    stream_t* l;
+    //printf("Pause\n");
+    stream_t *l;
     UBOND_TAILQ_FOREACH(l, &active)
     {
         ev_io_stop(EV_DEFAULT_ &l->io_read);
     }
+    paused = 1;
 }
 stream_t* find(uint32_t id)
 {
@@ -145,12 +149,17 @@ static void on_read_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
     char buf[DEFAULT_MTU];
     stream_t* s = (stream_t*)ev->data;
     ubond_pkt_t* pkt ;
-    do {
+    int read = 0;
+    do
+    {
         pkt = ubond_pkt_get();
-        if (ubond_pkt_list_is_full(&send_buffer)) break;
-        rv = recv(ev->fd, &pkt->p.data, ubond_options.mtu, 0);
-        if (rv <= 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        printf("fetching %d %d %d\n", ev->fd, s->fd, ubond_options.mtu);
+        if (ubond_pkt_list_is_full(&send_buffer))
+            break;
+        rv = recv(ev->fd, &pkt->p.data, ubond_options.mtu, MSG_DONTWAIT);
+        if (rv <= 0) { // ==0 is wrong? // the read>0 is a hack???
+            if (read>0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                printf("Would block\n");
                 break;
             } else {
                 log_warn("sock", "stream closing ");
@@ -158,6 +167,8 @@ static void on_read_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
                 break;
             }
         } else {
+            read++;
+            printf("Send packet\n");
             pkt->p.len = rv;
             pkt->p.data_seq = s->data_seq++;
             if (s->their_flow_id)
@@ -208,7 +219,7 @@ static void on_accept_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
     }
 
     UBOND_TAILQ_INSERT_TAIL(&active, stream);
-    activate_streams();
+    if (!paused) ev_io_start(EV_DEFAULT_ &stream->io_read);
 
     struct sockaddr* d = (struct sockaddr*)(pkt->p.data);
     *d = cliaddr;
@@ -288,5 +299,5 @@ void ubond_socks_init(ubond_pkt_t* pkt)
     s->io_read.data = (void*)s;
 
     UBOND_TAILQ_INSERT_TAIL(&active, s);
-    activate_streams();
+    if (!paused) ev_io_start(EV_DEFAULT_ &s->io_read);
 }
