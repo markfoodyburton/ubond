@@ -153,13 +153,13 @@ static void on_read_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
     do
     {
         pkt = ubond_pkt_get();
-        printf("fetching %d %d %d\n", ev->fd, s->fd, ubond_options.mtu);
+        //printf("fetching %d %d %d\n", ev->fd, s->fd, ubond_options.mtu);
         if (ubond_pkt_list_is_full(&send_buffer))
             break;
         rv = recv(ev->fd, &pkt->p.data, ubond_options.mtu, MSG_DONTWAIT);
         if (rv <= 0) { // ==0 is wrong? // the read>0 is a hack???
             if (read>0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                printf("Would block\n");
+                //printf("Would block\n");
                 break;
             } else {
                 log_warn("sock", "stream closing ");
@@ -168,7 +168,7 @@ static void on_read_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
             }
         } else {
             read++;
-            printf("Send packet\n");
+            //printf("Send packet\n");
             pkt->p.len = rv;
             pkt->p.data_seq = s->data_seq++;
             if (s->their_flow_id)
