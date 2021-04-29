@@ -1842,12 +1842,12 @@ ubond_rtun_check_timeout(EV_P_ ev_timer* w, int revents)
         if ((t->last_activity != 0) && (t->last_activity + t->timeout + (UBOND_IO_TIMEOUT_DEFAULT * 2) + ((t->srtt_av / 1000.0) * 2)) < now) {
             log_info("protocol", "%s timeout", t->name);
             ubond_rtun_status_down(t);
-        } else {
-            ubond_rtun_send_keepalive(now, t);
         }
     }
     if (t->status < UBOND_AUTHOK) {
         ubond_rtun_tick_connect(t);
+    } else {
+        ubond_rtun_send_keepalive(now, t);
     }
 }
 
