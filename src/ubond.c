@@ -367,11 +367,10 @@ ubond_loss_update(ubond_tunnel_t* tun, uint64_t seq)
         tun->seq_vect |= 1ull;
     } else {
         tun->seq_vect |= 1ull << (tun->seq_last - seq);
-        tun->reorder_length = ((tun->reorder_length * 9.0) + (tun->seq_last - seq)) / 10.0;
     }
+    // according to RFC 3208 you can target the last two packets being out of order
     int64_t v = tun->seq_vect | 0x8000000000000000ULL; // signed int.
-    tun->loss = 64 - count_1s(v >> tun->reorder_length);
-
+    tun->loss = 64 - count_1s(v >> 2);
     tun->seq_last = seq;
 }
 
@@ -462,7 +461,6 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
             } else if (pkt->p.type == UBOND_PKT_KEEPALIVE && tun->status >= UBOND_AUTHOK) {
                 log_debug("protocol", "%s keepalive received", tun->name);
                 ubond_rtun_tick(tun);
-                ev_tstamp now = ev_now(EV_DEFAULT_UC);
                 uint64_t bw = 0;
                 sscanf(pkt->p.data, "%lu", &bw);
                 if (bw > 0) {
@@ -871,7 +869,6 @@ ubond_rtun_new(const char* name,
     new->recvbytes = 0;
     new->permitted = 0;
     new->quota = quota;
-    new->reorder_length = 0;
     new->seq = 0;
     new->saved_timestamp = -1;
     new->saved_timestamp_received_at = 0;
@@ -1298,7 +1295,6 @@ ubond_rtun_status_up(ubond_tunnel_t* t)
     t->srtt_d = 0;
     t->srtt_c = 0;
     t->loss = 0;
-    t->reorder_length = 0;
     t->bm_data = 0;
     ubond_update_status();
     update_process_title();
@@ -1683,7 +1679,7 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
                 }
                 t->bandwidth_max = new_bwm;
             } else {
-                if (t->srtt_reductions > 50) { // more than 50% reductions, we should reduce bandwidth
+                if (reductions > 50) { // more than 50% reductions, we should reduce bandwidth
                     t->bandwidth_max *= 0.99;
                 }
                 if (t->bandwidth_max < 100)

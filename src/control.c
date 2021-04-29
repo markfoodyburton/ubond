@@ -447,7 +447,7 @@ void ubond_control_write_status(struct ubond_control *ctrl)
                        t->srtt,
                        (float)(t->loss),
                        (float)(t->sent_loss),
-                       t->reorder_length,
+                       0,
                        (uint32_t)(t->permitted/1000000),
                        t->disconnects,
                        (uint32_t)t->last_activity,
