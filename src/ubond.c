@@ -1432,6 +1432,7 @@ ubond_rtun_challenge_send(ubond_tunnel_t* t)
     pkt->p.type = UBOND_PKT_AUTH;
 
     t->status = UBOND_AUTHSENT;
+    ubond_rtun_do_send(t, 0);
     log_debug("protocol", "%s ubond_rtun_challenge_send", t->name);
 }
 
@@ -1464,6 +1465,7 @@ ubond_rtun_send_auth(ubond_tunnel_t* t)
             pkt->p.type = UBOND_PKT_AUTH_OK;
             if (t->status < UBOND_AUTHOK)
                 t->status = UBOND_AUTHSENT;
+            ubond_rtun_do_send(t, 0);
             log_debug("protocol", "%s sending 'OK'", t->name);
             log_info("protocol", "%s authenticated", t->name);
         }
@@ -1757,6 +1759,7 @@ ubond_rtun_send_keepalive(ev_tstamp now, ubond_tunnel_t* t)
         UBOND_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
         pkt->p.type = UBOND_PKT_KEEPALIVE;
         pkt->p.len = sprintf(pkt->p.data, "%lu", t->bandwidth_measured) + 1;
+        ubond_rtun_do_send(t, 0);
     }
 }
 
@@ -1772,6 +1775,7 @@ ubond_rtun_send_disconnect(ubond_tunnel_t* t)
         UBOND_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
         pkt->p.type = UBOND_PKT_DISCONNECT;
         pkt->p.len = 1;
+        ubond_rtun_do_send(t, 0);
     }
 }
 
