@@ -149,11 +149,9 @@ typedef struct ubond_tunnel_s
     int disconnects;      /* is it stable ? */
     int conn_attempts;    /* connection attempts */
     int fallback_only;    /* if set, this link will be used when all others are down */
-    double sent_loss;   /* loss as reported by far end */
-    uint64_t loss_cnt;
-    uint64_t loss_event;
     uint64_t pkts_cnt;
-    double loss_av;    /* our average loss */
+    int sent_loss;   /* loss as reported by far end */
+    int loss;    /* our average loss */
     uint64_t seq;
     uint64_t saved_timestamp;
     uint64_t saved_timestamp_received_at;
@@ -173,9 +171,7 @@ typedef struct ubond_tunnel_s
     uint64_t recvbytes;   /* 64bit bytes recv counter */
     int64_t permitted;  /* how many bytes we can send */
     uint32_t quota; /* how many bytes per second we can send */
-    uint32_t reorder_length_preset;  /* minimum  packets this tunnel can re-order */
     uint32_t reorder_length;  /* how many packets this tunnel can re-order */
-    uint32_t reorder_length_max;
     uint32_t timeout;     /* configured timeout in seconds */
     uint64_t bandwidth_max;   /* max bandwidth in bytes per second */
     //uint64_t bandwidth;   /* current bandwidth in bytes per second */
@@ -225,8 +221,7 @@ ubond_tunnel_t *ubond_rtun_new(const char *name,
     const char *bindaddr, const char *bindport, const char *binddev, uint32_t bindfib,
     const char *destaddr, const char *destport,
     int server_mode, uint32_t timeout,
-    int fallback_only, uint32_t bandwidth, uint32_t quota,
-    uint32_t reorder_length);
+    int fallback_only, uint32_t bandwidth, uint32_t quota);
 void ubond_rtun_drop(ubond_tunnel_t *t);
 void ubond_rtun_status_down(ubond_tunnel_t *t);
 #ifdef HAVE_FILTERS

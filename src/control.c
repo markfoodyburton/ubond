@@ -445,10 +445,9 @@ void ubond_control_write_status(struct ubond_control *ctrl)
                        t->recvbytes,
                        t->bandwidth_max,
                        t->srtt,
-//                       (float)t->loss_av,
-                       ((t->loss_cnt*100.0/(64.0-(float)t->reorder_length))),// + t->loss_av)/2.0,
-                       t->sent_loss,
-                       t->reorder_length_max,
+                       (float)(t->loss),
+                       (float)(t->sent_loss),
+                       t->reorder_length,
                        (uint32_t)(t->permitted/1000000),
                        t->disconnects,
                        (uint32_t)t->last_activity,
@@ -457,7 +456,6 @@ void ubond_control_write_status(struct ubond_control *ctrl)
                        //t->weight,
                        (LIST_NEXT(t, entries) ? "," : "")
                       );
-        t->reorder_length_max=t->reorder_length;
         ubond_control_write(ctrl, buf, ret);
     }
     ubond_control_write(ctrl, "]}\n", 3);

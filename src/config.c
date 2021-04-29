@@ -259,7 +259,6 @@ ubond_config(int config_file_fd, int first_time)
                 char *dstport;
                 uint32_t bwlimit = 0;
                 uint32_t quota = 0;
-                uint32_t reorder_length = 1;
                 uint32_t timeout = 30;
                 int create_tunnel = 1;
 
@@ -308,9 +307,6 @@ ubond_config(int config_file_fd, int first_time)
                     NULL, 0);
                 _conf_set_uint_from_conf(
                     config, lastSection, "quota", &quota, 0,
-                    NULL, 0);
-                _conf_set_uint_from_conf(
-                    config, lastSection, "reorder_length", &reorder_length, 1,
                     NULL, 0);
                 _conf_set_uint_from_conf(
                     config, lastSection, "timeout", &timeout, default_timeout,
@@ -381,12 +377,6 @@ ubond_config(int config_file_fd, int first_time)
                                 tmptun->name, tmptun->quota, quota);
                             tmptun->quota = quota;
                         }
-                        if (tmptun->reorder_length_preset != reorder_length)
-                        {
-                          log_info("config", "%s reorder length changed from %d to %d",
-                                tmptun->name, tmptun->reorder_length_preset, reorder_length);
-                            tmptun->reorder_length_preset = reorder_length;
-                        }
                         create_tunnel = 0;
                         break; /* Very important ! */
                     }
@@ -398,7 +388,7 @@ ubond_config(int config_file_fd, int first_time)
                     ubond_rtun_new(
                         lastSection, bindaddr, bindport, binddev, bindfib, dstaddr, dstport,
                         default_server_mode, timeout, fallback_only,
-                        bwlimit, quota, reorder_length);
+                        bwlimit, quota);
                 }
                 if (bindaddr)
                     free(bindaddr);
