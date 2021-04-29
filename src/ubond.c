@@ -462,12 +462,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
             } else if (pkt->p.type == UBOND_PKT_KEEPALIVE && tun->status >= UBOND_AUTHOK) {
                 log_debug("protocol", "%s keepalive received", tun->name);
                 ubond_rtun_tick(tun);
-                tun->last_keepalive_ack = ev_now(EV_DEFAULT_UC);
-                /* Avoid flooding the network if multiple packets are queued */
-                if (tun->last_keepalive_ack_sent + UBOND_IO_TIMEOUT_DEFAULT < tun->last_keepalive_ack) {
-                    tun->last_keepalive_ack_sent = tun->last_keepalive_ack;
-                    ubond_rtun_send_keepalive(tun->last_keepalive_ack, tun);
-                }
+                ev_tstamp now = ev_now(EV_DEFAULT_UC);
                 uint64_t bw = 0;
                 sscanf(pkt->p.data, "%lu", &bw);
                 if (bw > 0) {
@@ -480,6 +475,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
                 ubond_pkt_release(pkt);
             } else if (pkt->p.type == UBOND_PKT_AUTH || pkt->p.type == UBOND_PKT_AUTH_OK) {
                 // recieve any quota info, if there is any
+                ubond_rtun_tick(tun);
                 if (pkt->p.len > 2 && tun->quota) {
                     int64_t perm = 0;
                     sscanf(&(pkt->p.data[2]), "%ld", &perm);
@@ -489,6 +485,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
                 ubond_rtun_send_auth(tun);
                 ubond_pkt_release(pkt);
             } else if (pkt->p.type == UBOND_PKT_RESEND && tun->status >= UBOND_AUTHOK) {
+                ubond_rtun_tick(tun);
                 ubond_rtun_resend((struct resend_data*)pkt->p.data);
                 ubond_pkt_release(pkt);
             } else {
@@ -914,7 +911,6 @@ ubond_rtun_new(const char* name,
     ubond_pkt_list_init(&new->hpsbuf, PKTBUFSIZE);
     ubond_rtun_tick(new);
     new->timeout = timeout;
-    new->next_keepalive = 0;
     LIST_INSERT_HEAD(&rtuns, new, entries);
     new->io_read.data = new;
     new->io_write.data = new;
@@ -1295,10 +1291,7 @@ ubond_rtun_status_up(ubond_tunnel_t* t)
     enum chap_status old_status = t->status;
     ev_tstamp now = ev_now(EV_DEFAULT_UC);
     t->status = UBOND_AUTHOK;
-    t->next_keepalive = NEXT_KEEPALIVE(now, t);
     t->last_activity = now;
-    t->last_keepalive_ack = now;
-    t->last_keepalive_ack_sent = now;
     t->saved_timestamp = -1;
     t->saved_timestamp_received_at = 0;
     t->srtt = 40;
@@ -1765,7 +1758,6 @@ ubond_rtun_send_keepalive(ev_tstamp now, ubond_tunnel_t* t)
         pkt->p.type = UBOND_PKT_KEEPALIVE;
         pkt->p.len = sprintf(pkt->p.data, "%lu", t->bandwidth_measured) + 1;
     }
-    t->next_keepalive = NEXT_KEEPALIVE(now, t);
 }
 
 static void
@@ -1789,12 +1781,12 @@ ubond_rtun_check_lossy(ubond_tunnel_t* tun)
     double loss = tun->sent_loss;
     int status_changed = 0;
     ev_tstamp now = ev_now(EV_DEFAULT_UC);
-    int keepalive_ok = ((tun->last_keepalive_ack == 0) || (tun->last_keepalive_ack + (UBOND_IO_TIMEOUT_DEFAULT * 2) + ((tun->srtt_av / 1000.0) * 2)) > now);
+    int keepalive_ok = ((tun->last_activity == 0) || (tun->last_activity + (UBOND_IO_TIMEOUT_DEFAULT * 2) + ((tun->srtt_av / 1000.0) * 2)) > now);
 
     if (!keepalive_ok && tun->status == UBOND_AUTHOK) {
-        log_info("rtt", "%s keepalive reached threashold, keepalive recieved %fs ago", tun->name, now - tun->last_keepalive_ack);
+        log_info("rtt", "%s keepalive reached threashold, last activity recieved %fs ago", tun->name, now - tun->last_activity);
         tun->status = UBOND_LOSSY;
-        ubond_rtun_request_resend(tun, tun->seq_last, RESENDBUFSIZE);
+//        ubond_rtun_request_resend(tun, tun->seq_last, RESENDBUFSIZE);
         // We wont mark the tunnel down yet (hopefully it will come back again, and
         // coming back from a loss is quicker than pulling it down etc. However,
         // here, we fear the worst, and will ask for all packets again. Lets hope
@@ -1842,13 +1834,12 @@ ubond_rtun_check_timeout(EV_P_ ev_timer* w, int revents)
 
     ubond_rtun_check_lossy(t);
 
-    if (t->status >= UBOND_AUTHOK && t->timeout > 0) {
-        if ((t->last_keepalive_ack != 0) && (t->last_keepalive_ack + t->timeout + (UBOND_IO_TIMEOUT_DEFAULT * 2) + ((t->srtt_av / 1000.0) * 2)) < now) {
+    if (t->status == UBOND_LOSSY) {
+        if ((t->last_activity != 0) && (t->last_activity + t->timeout + (UBOND_IO_TIMEOUT_DEFAULT * 2) + ((t->srtt_av / 1000.0) * 2)) < now) {
             log_info("protocol", "%s timeout", t->name);
             ubond_rtun_status_down(t);
         } else {
-            if (now > t->next_keepalive)
-                ubond_rtun_send_keepalive(now, t);
+            ubond_rtun_send_keepalive(now, t);
         }
     }
     if (t->status < UBOND_AUTHOK) {

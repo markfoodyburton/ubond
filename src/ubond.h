@@ -75,7 +75,6 @@
  */
 #define UBOND_IO_TIMEOUT_INCREMENT 2
 
-#define NEXT_KEEPALIVE(now, t) (now + UBOND_IO_TIMEOUT_DEFAULT)
 /* Protocol version of ubond
  * version 0: ubond 2.0 to 2.1 
  * version 1: ubond 2.2+ (add reorder field in ubond_proto_t)
@@ -184,9 +183,6 @@ typedef struct ubond_tunnel_s
     enum chap_status status;    /* Auth status */
     ev_tstamp last_activity;
     ev_tstamp last_connection_attempt;
-    ev_tstamp next_keepalive;
-    ev_tstamp last_keepalive_ack;
-    ev_tstamp last_keepalive_ack_sent;
     ev_io io_read;
     ev_io io_write;
     ev_timer io_timeout;
