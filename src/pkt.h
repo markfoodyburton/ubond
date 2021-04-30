@@ -3,7 +3,23 @@
 
 #include <stdint.h>
 #include <ev.h>
-#include "crypto.h"
+
+#ifdef HAVE_FREEBSD
+#define _NSIG _SIG_MAXSIG
+#include <sys/endian.h>
+#endif
+
+#include <endian.h>
+
+#ifdef HAVE_DARWIN
+#include <libkern/OSByteOrder.h>
+#define be16toh OSSwapBigToHostInt16
+#define be32toh OSSwapBigToHostInt32
+#define be64toh OSSwapBigToHostInt64
+#define htobe16 OSSwapHostToBigInt16
+#define htobe32 OSSwapHostToBigInt32
+#define htobe64 OSSwapHostToBigInt64
+#endif
 
 #define DEFAULT_MTU 1500
 
@@ -30,10 +46,31 @@ typedef struct {
     uint16_t timestamp_reply;
     uint16_t tun_seq;  /* Stream sequence used for loss and reordering */
     uint16_t flow_id;  /* surely 65k streams is more than we can cope with anyway? */
-    uint32_t data_seq;
-    uint32_t ack_seq;
+    uint16_t data_seq;
+    uint16_t ack_seq;
     char data[DEFAULT_MTU];
 } __attribute__((packed)) ubond_proto_t;
+
+inline void betoh_proto(ubond_proto_t *proto)
+{
+    proto->len = be16toh(proto->len);
+    proto->timestamp = be16toh(proto->timestamp);
+    proto->timestamp_reply = be16toh(proto->timestamp_reply);
+    proto->tun_seq = be16toh(proto->tun_seq);
+    proto->flow_id = be16toh(proto->flow_id);
+    proto->data_seq = be16toh(proto->data_seq);
+    proto->ack_seq = be16toh(proto->ack_seq);
+}
+inline void htobe_proto(ubond_proto_t *proto)
+{
+    proto->len = htobe16(proto->len);
+    proto->timestamp = htobe16(proto->timestamp);
+    proto->timestamp_reply = htobe16(proto->timestamp_reply);
+    proto->tun_seq = htobe16(proto->tun_seq);
+    proto->flow_id = htobe16(proto->flow_id);
+    proto->data_seq = htobe16(proto->data_seq);
+    proto->ack_seq = htobe16(proto->ack_seq);
+}
 
 typedef struct ubond_pkt_t
 {
@@ -56,6 +93,14 @@ typedef struct ubond_pkt_list_t
   uint64_t length;
   uint64_t max_size;
 } ubond_pkt_list_t;
+
+typedef struct ubond_pkt_challenge
+{
+  enum {UBOND_CHALLENGE_AUTH, UBOND_CHALLENGE_OK} type;
+  uint16_t version;
+  uint64_t permitted;
+  char password[128];
+} ubond_pkt_challenge;
 
 #define UBOND_TAILQ_INIT(lst_) do{TAILQ_INIT(&((lst_)->list));(lst_)->length=0;}while(0)
 #define UBOND_TAILQ_INSERT_HEAD(lst_, l) do{TAILQ_INSERT_HEAD(&((lst_)->list), l, entry);(lst_)->length++;}while(0)

@@ -13,10 +13,9 @@ ubond_SOURCES = \
     config.c \
     tool.c tool.h \
     privsep.c privsep_fdpass.c privsep.h \
-    crypto.c crypto.h \
     log.c log.h \
     reorder.h reorder.c \
-    socks.h socks.c \    
+    socks.h socks.c \
     timestamp.h timestamp.c \
     tuntap_generic.c tuntap_generic.h \
     ubond.c ubond.h

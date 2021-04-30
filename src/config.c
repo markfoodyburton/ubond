@@ -24,7 +24,6 @@
  */
 #include <ifaddrs.h>
 
-#include "crypto.h"
 #include "includes.h"
 #include "tool.h"
 #include "tuntap_generic.h"
@@ -146,14 +145,11 @@ int ubond_config(int config_file_fd, int first_time)
                     "Password is mandatory.", 2);
                 if (password) {
                     log_info("config", "new password set");
-                    crypto_set_password(password, strlen(password));
+                    strlcpy(ubond_options.password, password,
+                            sizeof(ubond_options.password));
                     memset(password, 0, strlen(password));
                     free(password);
                 }
-                _conf_set_uint_from_conf(
-                    config, lastSection, "cleartext_data", &cleartext_data, 0,
-                    NULL, 0);
-                ubond_options.cleartext_data = cleartext_data;
 
                 _conf_set_uint_from_conf(
                     config, lastSection, "static_tunnel", &static_tunnel, 0,

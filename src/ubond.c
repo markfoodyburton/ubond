@@ -45,7 +45,6 @@
 #include <sys/types.h>
 #include <sys/un.h>
 
-#include "crypto.h"
 #include "includes.h"
 #include "setproctitle.h"
 #include "socks.h"
@@ -60,21 +59,6 @@
 #ifdef HAVE_LINUX
 #include "systemd.h"
 #include <sys/prctl.h>
-#endif
-
-#ifdef HAVE_FREEBSD
-#define _NSIG _SIG_MAXSIG
-#include <sys/endian.h>
-#endif
-
-#ifdef HAVE_DARWIN
-#include <libkern/OSByteOrder.h>
-#define be16toh OSSwapBigToHostInt16
-#define be32toh OSSwapBigToHostInt32
-#define be64toh OSSwapBigToHostInt64
-#define htobe16 OSSwapHostToBigInt16
-#define htobe32 OSSwapHostToBigInt32
-#define htobe64 OSSwapHostToBigInt64
 #endif
 
 /* GLOBALS */
@@ -179,7 +163,7 @@ struct ubond_options_s ubond_options = {
     .debug = 0,
     .verbose = 0,
     .unpriv_user = "ubond",
-    .cleartext_data = 1,
+    .password = "password",
     .static_tunnel = 0,
     .root_allowed = 0,
 };
@@ -404,6 +388,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
             ubond_pkt_release(pkt);
             break;
         }
+        betoh_proto(&(pkt->p));
 
         pkt->len = len; // stamp the wire length
 
@@ -429,7 +414,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
             fatalx("tun->addrinfo is NULL!");
 
         if ((tun->addrinfo->ai_addrlen != addrlen) || (memcmp(tun->addrinfo->ai_addr, &clientaddr, addrlen) != 0)) {
-            if (ubond_options.cleartext_data && tun->status >= UBOND_AUTHOK) {
+            if (tun->status >= UBOND_AUTHOK) {
                 log_warnx("protocol", "%s rejected non authenticated connection",
                     tun->name);
                 ubond_rtun_status_down(tun);
@@ -452,7 +437,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
                 memcpy(tun->addrinfo->ai_addr, &clientaddr, addrlen);
             }
         }
-        log_debug("net", "< %s recv %d bytes (size=%d, type=%d, seq=%" PRIu64,
+        log_debug("net", "< %s recv %d bytes (size=%d, type=%d, seq=%d)",
             tun->name, (int)len, pkt->p.len, pkt->p.type, pkt->p.data_seq);
 
         if (tun->status >= UBOND_AUTHOK) {
@@ -502,18 +487,21 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
             if (pkt->p.type == UBOND_PKT_AUTH || pkt->p.type == UBOND_PKT_AUTH_OK) {
                 // recieve any quota info, if there is any
                 ubond_rtun_tick(tun);
-                uint16_t v;
-                sscanf(&(pkt->p.data[2]), "%hu", &v);
-                if (v != UBOND_PROTOCOL_VERSION) {
+
+                ubond_pkt_challenge* challenge = (ubond_pkt_challenge*)(pkt->p.data);
+
+                if (challenge->version != UBOND_PROTOCOL_VERSION) {
                     fatalx("Protocol version must match");
                 }
-                if (pkt->p.len > 4 && tun->quota) {
-                    int64_t perm = 0;
-                    sscanf(&(pkt->p.data[4]), "%ld", &perm);
+                if (strcmp(challenge->password, ubond_options.password) != 0) {
+                    log_warnx("password", "Invalid password");
+                } else {
+                    int64_t perm = challenge->permitted;
                     if (perm > tun->permitted)
                         tun->permitted = perm;
+
+                    ubond_rtun_send_auth(tun);
                 }
-                ubond_rtun_send_auth(tun);
             } else {
                 log_debug("protocol", "%s ignoring non authenticated packet",
                     tun->name);
@@ -527,9 +515,7 @@ static int
 ubond_protocol_read(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
     ubond_proto_t* proto = &pkt->p;
-    unsigned char nonce[crypto_NONCEBYTES];
     int ret;
-    uint16_t rlen;
     uint64_t now64 = ubond_timestamp64(ev_now(EV_DEFAULT_UC));
 
     tun->pkts_cnt++;
@@ -541,37 +527,12 @@ ubond_protocol_read(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
             tun->name, pkt->len);
         goto fail;
     }
-    rlen = be16toh(pkt->p.len);
-    if (/*rlen == 0 ||*/ rlen > sizeof(proto->data)) {
-        log_warnx("protocol", "%s invalid packet size: %d", tun->name, rlen);
+
+    if (/*rlen == 0 ||*/ proto->len > sizeof(proto->data)) {
+        log_warnx("protocol", "%s invalid packet size: %d", tun->name, proto->len);
         goto fail;
     }
-    proto->tun_seq = be64toh(proto->tun_seq);
-    proto->timestamp = be16toh(proto->timestamp);
-    proto->timestamp_reply = be16toh(proto->timestamp_reply);
-    proto->flow_id = be32toh(proto->flow_id);
-/* now auth the packet using libsodium before further checks */
-#ifdef ENABLE_CRYPTO
-    if (!(ubond_options.cleartext_data && (proto->type == UBOND_PKT_DATA || proto->type == UBOND_PKT_DATA_RESEND))) {
-        sodium_memzero(nonce, sizeof(nonce));
-        memcpy(nonce, &proto->tun_seq, sizeof(proto->tun_seq));
-        memcpy(nonce + sizeof(proto->tun_seq), &proto->flow_id, sizeof(proto->flow_id));
-        if ((ret = crypto_decrypt((unsigned char*)pkt->p.data,
-                 (const unsigned char*)&pkt->p.data, rlen,
-                 nonce))
-            != 0) {
-            log_warnx("protocol", "%s crypto_decrypt failed: %d",
-                tun->name, ret);
-            goto fail;
-        }
-        rlen -= crypto_PADSIZE;
-    }
-#endif
-    proto->len = rlen; // record the length of the data in the packet (which may
-    // have changed due to decryption, and will anyway now be
-    // LE, not BE)
 
-    proto->data_seq = be64toh(proto->data_seq);
     ubond_loss_update(tun, proto->tun_seq);
     // use the TUN seq number to
     // calculate loss
@@ -616,11 +577,10 @@ int is_tcp(ubond_pkt_t* pkt)
 static int
 ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
-    unsigned char nonce[crypto_NONCEBYTES];
     ssize_t ret;
     size_t wlen;
     ubond_proto_t* proto = &(pkt->p);
-    ubond_proto_t tmp_proto;
+    //ubond_proto_t tmp_proto;
 
     if (pkt->p.type != UBOND_PKT_DATA_RESEND) {
         if (is_tcp(pkt)) {
@@ -649,36 +609,6 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     //proto->flow_id = tun->flow_id; this is now handled by socks
     proto->sent_loss = tun->loss;
 
-#ifdef ENABLE_CRYPTO
-    if (!(ubond_options.cleartext_data && (pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND))) {
-        memcpy(&tmp_proto, proto, sizeof(tmp_proto));
-        if (wlen + crypto_PADSIZE > sizeof(proto->data)) {
-            log_warnx("protocol", "%s packet too long: %u/%d (packet=%d)",
-                tun->name,
-                (unsigned int)wlen + crypto_PADSIZE,
-                (unsigned int)sizeof(proto->data),
-                pkt->p.len);
-            return -1;
-        }
-        sodium_memzero(nonce, sizeof(nonce));
-        memcpy(nonce, &proto->tun_seq, sizeof(proto->tun_seq));
-        memcpy(nonce + sizeof(proto->tun_seq), &proto->flow_id, sizeof(proto->flow_id));
-        if ((ret = crypto_encrypt((unsigned char*)&proto->data,
-                 (const unsigned char*)&proto->data, proto->len,
-                 nonce))
-            != 0) {
-            log_warnx("protocol", "%s crypto_encrypt failed: %d incorrect password?",
-                tun->name, (int)ret);
-            return -1;
-        }
-        proto->len += crypto_PADSIZE;
-        wlen += crypto_PADSIZE;
-    } else
-#endif
-    {
-        memcpy(&tmp_proto, proto, PKTHDRSIZ(tmp_proto));
-    }
-
     pkt->len = wlen;
 
     // significant time can have elapsed, so maybe better use the current time
@@ -704,22 +634,11 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     }
 
     proto->timestamp = ubond_timestamp16(now64);
-    proto->len = htobe16(proto->len);
-    proto->tun_seq = htobe64(proto->tun_seq);
-    proto->data_seq = htobe64(proto->data_seq);
-    proto->flow_id = htobe32(proto->flow_id);
-    proto->timestamp = htobe16(proto->timestamp);
-    proto->timestamp_reply = htobe16(proto->timestamp_reply);
+
+    htobe_proto(proto);
     ret = sendto(tun->fd, proto, wlen, MSG_DONTWAIT,
         tun->addrinfo->ai_addr, tun->addrinfo->ai_addrlen);
-#ifdef ENABLE_CRYPTO
-    if (!(ubond_options.cleartext_data && (pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND))) {
-        memcpy(proto, &tmp_proto, sizeof(tmp_proto));
-    } else
-#endif
-    {
-        memcpy(proto, &tmp_proto, PKTHDRSIZ(tmp_proto));
-    }
+    betoh_proto(proto);
 
     if (ret < 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -758,7 +677,7 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
             log_warnx("net", "%s write error %d/%u",
                 tun->name, (int)ret, (unsigned int)wlen);
         } else {
-            log_debug("net", "> %s sent %d bytes (size=%d, type=%d, seq=%" , tun->name, (int)ret, be16toh(pkt->p.len), pkt->p.type, be64toh(pkt->p.data_seq));
+            log_debug("net", "> %s sent %d bytes (size=%d, type=%d, seq=%d)", tun->name, (int)ret, (pkt->p.len), pkt->p.type, (pkt->p.data_seq));
         }
     }
 
@@ -898,7 +817,7 @@ ubond_rtun_new(const char* name,
     new->seq_last = 0;
     new->seq_vect = (uint64_t)-1;
     new->loss = 0;
-    new->flow_id = crypto_nonce_random();
+    new->flow_id = 0;
     if (bandwidth_max == 0) {
         log_warnx("config",
             "Enabling automatic bandwidth adjustment");
@@ -1433,16 +1352,16 @@ ubond_rtun_challenge_send(ubond_tunnel_t* t)
 
     pkt = ubond_pkt_get();
     UBOND_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
-    pkt->p.data[0] = 'A';
-    pkt->p.data[1] = 'U';
-    pkt->p.len = 2;
-    pkt->p.len += sprintf(&(pkt->p.data[pkt->p.len]), "%hu", UBOND_PROTOCOL_VERSION);
-    if (pkt->p.len != 4) {printf("Programming error %d\n", pkt->p.len);}
 
-    // send quota info
-    if (t->quota) {
-        pkt->p.len += sprintf(&(pkt->p.data[pkt->p.len]), "%ld", t->permitted) + 1;
-    }
+    ubond_pkt_challenge challenge = {
+        UBOND_CHALLENGE_AUTH,
+        htobe16(UBOND_PROTOCOL_VERSION),
+        htobe64((t->quota) ? t->permitted : 0),
+        *(ubond_options.password)
+    };
+
+    *(ubond_pkt_challenge*)(pkt->p.data) = challenge;
+    pkt->p.len = sizeof(ubond_pkt_challenge);
 
     pkt->p.type = UBOND_PKT_AUTH;
 
@@ -1468,14 +1387,15 @@ ubond_rtun_send_auth(ubond_tunnel_t* t)
             pkt = ubond_pkt_get();
             UBOND_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
 
-            pkt->p.data[0] = 'O';
-            pkt->p.data[1] = 'K';
-            pkt->p.len = 2;
+            ubond_pkt_challenge challenge = {
+                UBOND_CHALLENGE_OK,
+                htobe16(UBOND_PROTOCOL_VERSION),
+                htobe64((t->quota) ? t->permitted : 0),
+                *(ubond_options.password)
+            };
 
-            // send quota info
-            if (t->quota) {
-                pkt->p.len += sprintf(&(pkt->p.data[pkt->p.len]), "%ld", t->permitted) + 1;
-            }
+            *(ubond_pkt_challenge*)(pkt->p.data) = challenge;
+            pkt->p.len = sizeof(ubond_pkt_challenge);
 
             pkt->p.type = UBOND_PKT_AUTH_OK;
             if (t->status < UBOND_AUTHOK)
@@ -2110,9 +2030,6 @@ int main(int argc, char** argv)
             setproctitle("[priv]");
         }
     }
-
-    if (crypto_init() == -1)
-        fatal(NULL, "libsodium initialization failed");
 
     log_init(ubond_options.debug, ubond_options.verbose, __progname);
 

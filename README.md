@@ -16,9 +16,9 @@ UBOND will do its best to achieve the following tasks:
   * Secure your internet connection by actively monitoring
     your links and removing the faulty ones, without loosing
     your TCP connections.
-  * Secure your internet connection to the aggregation server using
-    strong cryptography.
   * Scriptable automation and monitoring.
+
+UBOND will _NOT_ perform encryption on your data, you should organise end-to-end encryption, but equally your data may be 'shredded' between different channels.
 
 Quick install
 =============
@@ -127,14 +127,6 @@ Code running as root is very minimalist and highly readable to
 avoid risks as much as possible.
 
 Read more about [privilege separation](http://en.wikipedia.org/wiki/Privilege_separation)
-
-Cryptography
-------------
-  * Encryption: Salsa20 stream cipher
-  * Authentication: Poly1305 MAC
-
-Read more on [salsa20](http://cr.yp.to/salsa20.html) and [libsodium](http://doc.libsodium.org/).
-
 
 Principle of operations
 =======================

@@ -14,6 +14,9 @@
 #include <time.h>
 #include <math.h>
 #include <ev.h>
+#include <stdlib.h>
+#include <stddef.h>
+
 
 /* Many thanks Fabien Dupont! */
 #ifdef HAVE_LINUX
@@ -107,7 +110,7 @@ struct ubond_options_s
     int debug;
     /* User change if running as root */
     char unpriv_user[128];
-    int cleartext_data;
+    char password[128];
     int static_tunnel;
     int root_allowed;
     uint32_t reorder_buffer_size;
@@ -151,12 +154,12 @@ typedef struct ubond_tunnel_s
     int conn_attempts;    /* connection attempts */
     int fallback_only;    /* if set, this link will be used when all others are down */
     uint64_t pkts_cnt;
-    int sent_loss;   /* loss as reported by far end */
-    int loss;    /* our average loss */
-    uint64_t seq;
+    uint8_t sent_loss;   /* loss as reported by far end */
+    uint8_t loss;    /* our average loss must be less than 256!*/
+    uint16_t seq;
     uint64_t saved_timestamp;
     uint64_t saved_timestamp_received_at;
-    uint64_t seq_last;
+    uint16_t seq_last;
     uint64_t seq_vect;
     double srtt_av;
     double srtt;    

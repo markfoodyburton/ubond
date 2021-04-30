@@ -120,14 +120,6 @@ AM_CONDITIONAL([HAVE_STRNVIS], [test x"$have_strnvis" = x"true"])
 
 AC_CACHE_SAVE
 
-dnl checks for libsodium
-PKG_CHECK_MODULES([libsodium], [libsodium >= 0.6], [], [
-    AC_CHECK_HEADERS([sodium.h], [], [AC_MSG_ERROR("sodium.h not found")])
-    AC_CHECK_LIB([sodium], [sodium_init], [
-        libsodium_LIBS="-lsodium"
-        AC_DEFINE([HAVE_LIBSODIUM], [1], [sodium_init in -lsodium])
-    ], [AC_MSG_ERROR("libsodium not found")])
-])
 
 dnl checks for libev
 # lib ev
