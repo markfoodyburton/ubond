@@ -87,8 +87,7 @@ static void ubond_stream_close(stream_t* s, int final)
         else
             pkt->p.flow_id = s->flow_id;
         pkt->p.data_seq = s->data_seq++;
-        pkt->p.reorder = 1;
-        pkt->p.type = UBOND_PKT_SOCK_CLOSE;
+        pkt->p.type = UBOND_PKT_TCP_CLOSE;
         ubond_buffer_write(&hpsend_buffer, pkt);
     }
 }
@@ -175,7 +174,6 @@ static void on_read_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
                 pkt->p.flow_id = s->their_flow_id;
             else
                 pkt->p.flow_id = s->flow_id;
-            pkt->p.reorder = 1;
 
             pkt->p.type = UBOND_PKT_DATA;
             ubond_buffer_write(&send_buffer, pkt);
@@ -227,8 +225,7 @@ static void on_accept_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
     pkt->p.len = sizeof(struct sockaddr);
     pkt->p.flow_id = stream->flow_id;
     pkt->p.data_seq = stream->data_seq++;
-    pkt->p.reorder = 1;
-    pkt->p.type = UBOND_PKT_SOCK_OPEN;
+    pkt->p.type = UBOND_PKT_TCP_OPEN;
     ubond_buffer_write(&hpsend_buffer, pkt);
 }
 

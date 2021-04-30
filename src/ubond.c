@@ -398,71 +398,72 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
             }
             ubond_pkt_release(pkt);
             break;
-        } else if (len == 0) {
+        }
+        if (len == 0) {
             log_info("protocol", "%s peer closed the connection", tun->name);
             ubond_pkt_release(pkt);
             break;
-        } else {
-            pkt->len = len; // stamp the wire length
+        }
 
-            /* validate the received packet */
-            if (ubond_protocol_read(tun, pkt) < 0) {
+        pkt->len = len; // stamp the wire length
+
+        /* validate the received packet */
+        if (ubond_protocol_read(tun, pkt) < 0) {
+            ubond_pkt_release(pkt);
+            //            break;
+            //            return;
+        }
+
+        tun->recvbytes += len;
+        tun->recvpackets += 1;
+        tun->bm_data += pkt->p.len;
+        if (tun->quota) {
+            if (tun->permitted > (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD)) {
+                tun->permitted -= (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD);
+            } else {
+                tun->permitted = 0;
+            }
+        }
+
+        if (!tun->addrinfo)
+            fatalx("tun->addrinfo is NULL!");
+
+        if ((tun->addrinfo->ai_addrlen != addrlen) || (memcmp(tun->addrinfo->ai_addr, &clientaddr, addrlen) != 0)) {
+            if (ubond_options.cleartext_data && tun->status >= UBOND_AUTHOK) {
+                log_warnx("protocol", "%s rejected non authenticated connection",
+                    tun->name);
+                ubond_rtun_status_down(tun);
                 ubond_pkt_release(pkt);
-                //            break;
-                //            return;
+                return;
             }
-
-            tun->recvbytes += len;
-            tun->recvpackets += 1;
-            tun->bm_data += pkt->p.len;
-            if (tun->quota) {
-                if (tun->permitted > (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD)) {
-                    tun->permitted -= (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD);
-                } else {
-                    tun->permitted = 0;
-                }
+            char clienthost[NI_MAXHOST];
+            char clientport[NI_MAXSERV];
+            int ret;
+            if ((ret = getnameinfo((struct sockaddr*)&clientaddr, addrlen,
+                     clienthost, sizeof(clienthost),
+                     clientport, sizeof(clientport),
+                     NI_NUMERICHOST | NI_NUMERICSERV))
+                < 0) {
+                log_warn("protocol", "%s error in getnameinfo: %d",
+                    tun->name, ret);
+            } else {
+                log_info("protocol", "%s new connection -> %s:%s",
+                    tun->name, clienthost, clientport);
+                memcpy(tun->addrinfo->ai_addr, &clientaddr, addrlen);
             }
+        }
+        log_debug("net", "< %s recv %d bytes (size=%d, type=%d, seq=%" PRIu64,
+            tun->name, (int)len, pkt->p.len, pkt->p.type, pkt->p.data_seq);
 
-            if (!tun->addrinfo)
-                fatalx("tun->addrinfo is NULL!");
-
-            if ((tun->addrinfo->ai_addrlen != addrlen) || (memcmp(tun->addrinfo->ai_addr, &clientaddr, addrlen) != 0)) {
-                if (ubond_options.cleartext_data && tun->status >= UBOND_AUTHOK) {
-                    log_warnx("protocol", "%s rejected non authenticated connection",
-                        tun->name);
-                    ubond_rtun_status_down(tun);
-                    ubond_pkt_release(pkt);
-                    return;
-                }
-                char clienthost[NI_MAXHOST];
-                char clientport[NI_MAXSERV];
-                int ret;
-                if ((ret = getnameinfo((struct sockaddr*)&clientaddr, addrlen,
-                         clienthost, sizeof(clienthost),
-                         clientport, sizeof(clientport),
-                         NI_NUMERICHOST | NI_NUMERICSERV))
-                    < 0) {
-                    log_warn("protocol", "%s error in getnameinfo: %d",
-                        tun->name, ret);
-                } else {
-                    log_info("protocol", "%s new connection -> %s:%s",
-                        tun->name, clienthost, clientport);
-                    memcpy(tun->addrinfo->ai_addr, &clientaddr, addrlen);
-                }
-            }
-            log_debug("net", "< %s recv %d bytes (size=%d, type=%d, seq=%" PRIu64 ", reorder=%d)",
-                tun->name, (int)len, pkt->p.len, pkt->p.type, pkt->p.data_seq, pkt->p.reorder);
-
-            if (pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND) {
-                if (tun->status >= UBOND_AUTHOK) {
-                    ubond_rtun_tick(tun);
-                    ubond_reorder_insert(tun, pkt);
-                } else {
-                    log_debug("protocol", "%s ignoring non authenticated packet",
-                        tun->name);
-                    ubond_pkt_release(pkt);
-                }
-            } else if (pkt->p.type == UBOND_PKT_KEEPALIVE && tun->status >= UBOND_AUTHOK) {
+        if (tun->status >= UBOND_AUTHOK) {
+            switch (pkt->p.type) {
+            case UBOND_PKT_DATA:
+            case UBOND_PKT_DATA_RESEND:
+            case UBOND_PKT_TCP_DATA:
+                ubond_rtun_tick(tun);
+                ubond_reorder_insert(tun, pkt);
+                break;
+            case UBOND_PKT_KEEPALIVE:
                 log_debug("protocol", "%s keepalive received", tun->name);
                 ubond_rtun_tick(tun);
                 uint64_t bw = 0;
@@ -471,37 +472,51 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
                     tun->bandwidth_out = bw;
                 }
                 ubond_pkt_release(pkt);
-            } else if (pkt->p.type == UBOND_PKT_DISCONNECT && tun->status >= UBOND_AUTHOK) {
+                break;
+            case UBOND_PKT_DISCONNECT:
                 log_info("protocol", "%s disconnect received", tun->name);
                 ubond_rtun_status_down(tun);
                 ubond_pkt_release(pkt);
-            } else if (pkt->p.type == UBOND_PKT_AUTH || pkt->p.type == UBOND_PKT_AUTH_OK) {
+                break;
+            case UBOND_PKT_RESEND:
+                ubond_rtun_tick(tun);
+                ubond_rtun_resend((struct resend_data*)pkt->p.data);
+                ubond_pkt_release(pkt);
+                break;
+            case UBOND_PKT_TCP_OPEN:
+                ubond_rtun_tick(tun);
+                ubond_socks_init(pkt);
+                ubond_pkt_release(pkt);
+                break;
+            case UBOND_PKT_TCP_CLOSE:
+                ubond_rtun_tick(tun);
+                ubond_socks_term(pkt);
+                ubond_pkt_release(pkt);
+                break;
+            default:
+                log_warnx("protocol", "Unknown packet type %d", pkt->p.type);
+                ubond_pkt_release(pkt);
+            }
+
+        } else {
+            if (pkt->p.type == UBOND_PKT_AUTH || pkt->p.type == UBOND_PKT_AUTH_OK) {
                 // recieve any quota info, if there is any
                 ubond_rtun_tick(tun);
-                if (pkt->p.len > 2 && tun->quota) {
+                uint16_t v;
+                sscanf(&(pkt->p.data[2]), "%hu", &v);
+                if (v != UBOND_PROTOCOL_VERSION) {
+                    fatalx("Protocol version must match");
+                }
+                if (pkt->p.len > 4 && tun->quota) {
                     int64_t perm = 0;
-                    sscanf(&(pkt->p.data[2]), "%ld", &perm);
+                    sscanf(&(pkt->p.data[4]), "%ld", &perm);
                     if (perm > tun->permitted)
                         tun->permitted = perm;
                 }
                 ubond_rtun_send_auth(tun);
-                ubond_pkt_release(pkt);
-            } else if (pkt->p.type == UBOND_PKT_RESEND && tun->status >= UBOND_AUTHOK) {
-                ubond_rtun_tick(tun);
-                ubond_rtun_resend((struct resend_data*)pkt->p.data);
-                ubond_pkt_release(pkt);
-            } else if (pkt->p.type == UBOND_PKT_SOCK_OPEN && tun->status >= UBOND_AUTHOK) {
-                ubond_rtun_tick(tun);
-                ubond_socks_init(pkt);
-                ubond_pkt_release(pkt);
-            } else if (pkt->p.type == UBOND_PKT_SOCK_CLOSE && tun->status >= UBOND_AUTHOK) {
-                ubond_rtun_tick(tun);
-                ubond_socks_term(pkt);
-                ubond_pkt_release(pkt);
             } else {
-                if (tun->status >= UBOND_AUTHOK) {
-                    log_warnx("protocol", "Unknown packet type %d", pkt->p.type);
-                }
+                log_debug("protocol", "%s ignoring non authenticated packet",
+                    tun->name);
                 ubond_pkt_release(pkt);
             }
         }
@@ -555,24 +570,17 @@ ubond_protocol_read(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     proto->len = rlen; // record the length of the data in the packet (which may
     // have changed due to decryption, and will anyway now be
     // LE, not BE)
-    if (proto->version >= 1) {
-        proto->data_seq = be64toh(proto->data_seq);
-        ubond_loss_update(tun, proto->tun_seq);
-        // use the TUN seq number to
-        // calculate loss
-        if (proto->version >= 2) {
-            tun->sent_loss = proto->sent_loss;
-            if (tun->sent_loss >= (LOSS_TOLERENCE / 4.0)) {
-                ubond_rtun_recalc_weight();
-            }
-        } else {
-            tun->sent_loss = 0;
-        }
-    } else {
-        proto->reorder = 0;
-        proto->data_seq = 0;
-        proto->tun_seq = 0;
+
+    proto->data_seq = be64toh(proto->data_seq);
+    ubond_loss_update(tun, proto->tun_seq);
+    // use the TUN seq number to
+    // calculate loss
+
+    tun->sent_loss = proto->sent_loss;
+    if (tun->sent_loss >= (LOSS_TOLERENCE / 4.0)) {
+        ubond_rtun_recalc_weight();
     }
+
     if (proto->timestamp != (uint16_t)-1) {
         tun->saved_timestamp = proto->timestamp;
         tun->saved_timestamp_received_at = now64;
@@ -593,15 +601,15 @@ fail:
     return -1;
 }
 
-void set_reorder(ubond_pkt_t* pkt)
+int is_tcp(ubond_pkt_t* pkt)
 {
     // should packet inspect, and only re-order TCP packets !
     // 17 - UDP
     // 6 - TCP
     if ((pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND) && pkt->p.data[9] == 6) {
-        pkt->p.reorder = 1;
+        return 1;
     } else {
-        pkt->p.reorder = 0;
+        return 0;
     }
 }
 
@@ -613,10 +621,9 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     size_t wlen;
     ubond_proto_t* proto = &(pkt->p);
     ubond_proto_t tmp_proto;
-    set_reorder(pkt);
 
     if (pkt->p.type != UBOND_PKT_DATA_RESEND) {
-        if (pkt->p.reorder) {
+        if (is_tcp(pkt)) {
             proto->data_seq = data_seq;
         } else {
             proto->data_seq = 0;
@@ -640,7 +647,6 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     // they fail to send.
 
     //proto->flow_id = tun->flow_id; this is now handled by socks
-    proto->version = UBOND_PROTOCOL_VERSION;
     proto->sent_loss = tun->loss;
 
 #ifdef ENABLE_CRYPTO
@@ -731,7 +737,7 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         // we are here when we succeed to send the packet
 
         if (pkt->p.type != UBOND_PKT_DATA_RESEND) {
-            if (pkt->p.reorder)
+            if (is_tcp(pkt))
                 data_seq++;
         }
         //      if (pkt->p.reorder) {
@@ -752,8 +758,7 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
             log_warnx("net", "%s write error %d/%u",
                 tun->name, (int)ret, (unsigned int)wlen);
         } else {
-            log_debug("net", "> %s sent %d bytes (size=%d, type=%d, seq=%" PRIu64 ", reorder=%d)",
-                tun->name, (int)ret, be16toh(pkt->p.len), pkt->p.type, be64toh(pkt->p.data_seq), pkt->p.reorder);
+            log_debug("net", "> %s sent %d bytes (size=%d, type=%d, seq=%" , tun->name, (int)ret, be16toh(pkt->p.len), pkt->p.type, be64toh(pkt->p.data_seq));
         }
     }
 
@@ -1431,6 +1436,8 @@ ubond_rtun_challenge_send(ubond_tunnel_t* t)
     pkt->p.data[0] = 'A';
     pkt->p.data[1] = 'U';
     pkt->p.len = 2;
+    pkt->p.len += sprintf(&(pkt->p.data[pkt->p.len]), "%hu", UBOND_PROTOCOL_VERSION);
+    if (pkt->p.len != 4) {printf("Programming error %d\n", pkt->p.len);}
 
     // send quota info
     if (t->quota) {
@@ -1538,7 +1545,7 @@ ubond_rtun_resend(struct resend_data* d)
         uint64_t seqn = d->seqn + i;
         ubond_pkt_t* old_pkt = loss_tun->old_pkts[seqn % RESENDBUFSIZE];
         if (old_pkt && old_pkt->p.tun_seq == seqn) {
-            if (old_pkt->p.type != UBOND_PKT_DATA || old_pkt->p.reorder /*|| old_pkt->p.data[9]==17*/) { // only send tcp, e.g. refuse UDP packets!
+            if (old_pkt->p.type != UBOND_PKT_DATA || is_tcp(old_pkt) /*|| old_pkt->p.data[9]==17*/) { // only send tcp, e.g. refuse UDP packets!
                 ubond_buffer_write(&hpsend_buffer, old_pkt);
                 loss_tun->old_pkts[seqn % RESENDBUFSIZE] = NULL; // remove this from the old list
                 if (old_pkt->p.type == UBOND_PKT_DATA)
@@ -2051,7 +2058,7 @@ int main(int argc, char** argv)
             ubond_options.verbose++;
             break;
         case 'V': /* --version */
-            printf("ubond version %s.\n", VERSION);
+            printf("ubond version %s. Protocol version %hu\n", VERSION, UBOND_PROTOCOL_VERSION);
             _exit(0);
             break;
         case 'q': /* --quiet */

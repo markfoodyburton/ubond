@@ -220,13 +220,13 @@ void ubond_reorder_enable()
 {
     reorder_buffer->enabled = 1;
 }
-
+extern int is_tcp(ubond_pkt_t *pkt);
 void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
     struct ubond_reorder_buffer* b = reorder_buffer;
     b->pkts_arrived++;
 
-    if (pkt->p.reorder && (!b->is_initialized || ((int64_t)(b->min_seqn - pkt->p.data_seq) > 1000 && pkt->p.data_seq < 1000))) {
+    if (is_tcp(pkt) && (!b->is_initialized || ((int64_t)(b->min_seqn - pkt->p.data_seq) > 1000 && pkt->p.data_seq < 1000))) {
         b->min_seqn = pkt->p.data_seq;
         b->is_initialized = 1;
         log_warnx("reorder", "initial sequence: %" PRIu64 "", pkt->p.data_seq);
@@ -239,7 +239,7 @@ void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
             out_resends--;
     }
 
-    if (!b->enabled || !pkt->p.reorder || !pkt->p.data_seq /* || pkt->p.data_seq==b->min_seqn*/) {
+    if (!b->enabled || !is_tcp(pkt) || !pkt->p.data_seq /* || pkt->p.data_seq==b->min_seqn*/) {
         if (!ubond_stream_write(pkt))
             ubond_rtun_inject_tuntap(pkt); // this will deliver and free the packet
         // Deliver non reordable packets ASAP, as that shoudn't effect a tcp algorithm

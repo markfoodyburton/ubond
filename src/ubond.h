@@ -78,6 +78,7 @@
 /* Protocol version of ubond
  * version 0: ubond 2.0 to 2.1 
  * version 1: ubond 2.2+ (add reorder field in ubond_proto_t)
+ * version 2: no longer sent on the packet, but on the auth, and structure chabged!
  */
 #define UBOND_PROTOCOL_VERSION 2
 

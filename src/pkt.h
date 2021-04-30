@@ -15,28 +15,35 @@ enum {
     UBOND_PKT_DATA_RESEND,
     UBOND_PKT_DISCONNECT,
     UBOND_PKT_RESEND,
-    UBOND_PKT_SOCK_OPEN,
-    UBOND_PKT_SOCK_CLOSE
+    UBOND_PKT_TCP_OPEN,
+    UBOND_PKT_TCP_CLOSE,
+    UBOND_PKT_TCP_DATA
 };
 
 
 /* packet sent on the wire. 20 bytes headers for ubond */
 typedef struct {
     uint16_t len;
-    uint16_t version: 4; /* protocol version */
-    uint16_t type: 6;   /* protocol options */
-    uint16_t reorder: 1; /* do reordering or not */
-    uint16_t sent_loss: 5;  /* loss as reported from far end */
+    uint8_t type;   /* protocol options 256 type's more than enough */
+    uint8_t sent_loss;  /* loss as reported from far end  0-256 more than enough */
     uint16_t timestamp;
     uint16_t timestamp_reply;
-    uint32_t flow_id;
-    uint64_t tun_seq;     /* Stream sequence per flow (for crypto) */
-    uint64_t data_seq;    /* data packets global sequence */
+    uint16_t tun_seq;  /* Stream sequence used for loss and reordering */
+    uint16_t flow_id;  /* surely 65k streams is more than we can cope with anyway? */
+    uint32_t data_seq;
+    uint32_t ack_seq;
     char data[DEFAULT_MTU];
 } __attribute__((packed)) ubond_proto_t;
 
 typedef struct ubond_pkt_t
 {
+  //put a stream pointer here - 
+  //split data_seq into in/out - fill in the out with the latest recieved in 'in-order' seq ID.
+  //On reciept, if the send queue is empty, send an empty data packet. If there is stuff in the queue, dont bother.
+  //send 0 to say "send again", and start again on the last known good.
+
+
+
   ubond_proto_t p;
   ev_tstamp timestamp;
   uint16_t len; // wire read length
