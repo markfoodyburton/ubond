@@ -478,6 +478,10 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
                 ubond_socks_term(pkt);
                 ubond_pkt_release(pkt);
                 break;
+            case UBOND_PKT_AUTH:
+                ubond_rtun_send_auth(tun);
+            case UBOND_PKT_AUTH_OK:
+                break;
             default:
                 log_warnx("protocol", "Unknown packet type %d", pkt->p.type);
                 ubond_pkt_release(pkt);
@@ -489,6 +493,8 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
                 ubond_rtun_tick(tun);
 
                 ubond_pkt_challenge* challenge = (ubond_pkt_challenge*)(pkt->p.data);
+                challenge->version = be16toh(challenge->version);
+                challenge->permitted = be64toh(challenge->permitted);
 
                 if (challenge->version != UBOND_PROTOCOL_VERSION) {
                     fatalx("Protocol version must match");
@@ -1357,8 +1363,8 @@ ubond_rtun_challenge_send(ubond_tunnel_t* t)
         UBOND_CHALLENGE_AUTH,
         htobe16(UBOND_PROTOCOL_VERSION),
         htobe64((t->quota) ? t->permitted : 0),
-        *(ubond_options.password)
     };
+    strcpy(challenge.password, ubond_options.password);
 
     *(ubond_pkt_challenge*)(pkt->p.data) = challenge;
     pkt->p.len = sizeof(ubond_pkt_challenge);
@@ -1391,8 +1397,8 @@ ubond_rtun_send_auth(ubond_tunnel_t* t)
                 UBOND_CHALLENGE_OK,
                 htobe16(UBOND_PROTOCOL_VERSION),
                 htobe64((t->quota) ? t->permitted : 0),
-                *(ubond_options.password)
             };
+            strcpy(challenge.password, ubond_options.password);
 
             *(ubond_pkt_challenge*)(pkt->p.data) = challenge;
             pkt->p.len = sizeof(ubond_pkt_challenge);
