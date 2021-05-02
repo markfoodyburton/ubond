@@ -87,11 +87,16 @@ ubond_pkt_t* ubond_pkt_get()
         UBOND_TAILQ_REMOVE(&pool, p);
     } else {
         p = malloc(sizeof(struct ubond_pkt_t));
+        p->usecnt = 0;
     }
 
     p->stream = NULL;
     p->sent_tun = NULL;
 
+    if (p->usecnt != 0) {
+        fatalx("USECNT !=0 (get)");
+    }
+    p->usecnt++;
     pool_out++;
     return p;
 };
@@ -104,6 +109,11 @@ void ubond_pkt_release(ubond_pkt_t* p)
         log_warnx("PKT", "Packet has sent_tun on release?");
     }
     pool_out--;
+
+    p->usecnt--;
+    if (p->usecnt != 0) {
+        fatalx("USECNT !=0 (release)");
+    }
     UBOND_TAILQ_INSERT_HEAD(&pool, p);
 }
 void ubond_pkt_insert(ubond_pkt_list_t* list, ubond_pkt_t* pkt)
@@ -136,7 +146,7 @@ void ubond_buffer_write(ubond_pkt_list_t* buffer, ubond_pkt_t* p)
     if (p) {
         // record the eventual wire length needed
         bandwidthdata += p->p.len + IP4_UDP_OVERHEAD + PKTHDRSIZ(p->p);
-        UBOND_TAILQ_INSERT_HEAD(buffer, p);
+        ubond_pkt_insert(buffer, p);
     }
 }
 
@@ -398,6 +408,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
         }
         if (len == 0) {
             log_info("protocol", "%s peer closed the connection", tun->name);
+            ubond_rtun_status_down(tun);
             ubond_pkt_release(pkt);
             break;
         }
@@ -407,8 +418,9 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
 
         /* validate the received packet */
         if (ubond_protocol_read(tun, pkt) < 0) {
+            log_info("protocol", "Protocol error");
             ubond_pkt_release(pkt);
-            //            break;
+            break;
             //            return;
         }
 
@@ -432,7 +444,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
                     tun->name);
                 ubond_rtun_status_down(tun);
                 ubond_pkt_release(pkt);
-                return;
+                break;
             }
             char clienthost[NI_MAXHOST];
             char clientport[NI_MAXSERV];
@@ -604,7 +616,7 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     // old_pkts is a ring buffer of the last N packets.
     // The packets may be still held by the stream.
     if (tun->old_pkts[tun->seq % RESENDBUFSIZE]) {
-        tun->old_pkts[tun->seq % RESENDBUFSIZE]->sent_tun=NULL; // remove from this tun
+        tun->old_pkts[tun->seq % RESENDBUFSIZE]->sent_tun = NULL; // remove from this tun
         if (!tun->old_pkts[tun->seq % RESENDBUFSIZE]->stream) {
             ubond_pkt_release(tun->old_pkts[tun->seq % RESENDBUFSIZE]);
         }
@@ -1359,7 +1371,7 @@ ubond_rtun_challenge_send(ubond_tunnel_t* t)
         log_warnx("net", "%s high priority buffer: overflow", t->name);
 
     pkt = ubond_pkt_get();
-    UBOND_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
+    ubond_pkt_insert(&t->hpsbuf, pkt);
 
     ubond_pkt_challenge challenge = {
         UBOND_CHALLENGE_AUTH,
@@ -1393,7 +1405,7 @@ ubond_rtun_send_auth(ubond_tunnel_t* t)
                 log_warnx("net", "%s high priority buffer: overflow", t->name);
             }
             pkt = ubond_pkt_get();
-            UBOND_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
+            ubond_pkt_insert(&t->hpsbuf, pkt);
 
             ubond_pkt_challenge challenge = {
                 UBOND_CHALLENGE_OK,
@@ -1698,10 +1710,10 @@ ubond_rtun_choose(ubond_tunnel_t* rtun)
 #endif
 
     if (ubond_pkt_list_is_full(sbuf))
-        log_warnx("tuntap", "%s buffer: overflow", rtun->name);
+        log_warnx("net", "%s send buffer: overflow", rtun->name);
 
     /* Ask for a free buffer */
-    UBOND_TAILQ_INSERT_HEAD(sbuf, spkt);
+    ubond_pkt_insert(sbuf, spkt);
 
     return;
 }
@@ -1715,7 +1727,7 @@ ubond_rtun_send_keepalive(ev_tstamp now, ubond_tunnel_t* t)
     else {
         log_debug("protocol", "%s sending keepalive", t->name);
         pkt = ubond_pkt_get();
-        UBOND_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
+        ubond_pkt_insert(&t->hpsbuf, pkt);
         pkt->p.type = UBOND_PKT_KEEPALIVE;
         pkt->p.len = sprintf(pkt->p.data, "%lu", t->bandwidth_measured) + 1;
         ubond_rtun_do_send(t, 0);
@@ -1731,7 +1743,7 @@ ubond_rtun_send_disconnect(ubond_tunnel_t* t)
     else {
         log_debug("protocol", "%s sending disconnect", t->name);
         pkt = ubond_pkt_get();
-        UBOND_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
+        ubond_pkt_insert(&t->hpsbuf, pkt);
         pkt->p.type = UBOND_PKT_DISCONNECT;
         pkt->p.len = 1;
         ubond_rtun_do_send(t, 0);

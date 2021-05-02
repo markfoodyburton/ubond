@@ -79,6 +79,8 @@ typedef struct ubond_pkt_t
 
   ubond_proto_t p;
   uint16_t len; // wire read length
+  int usecnt;
+
   TAILQ_ENTRY(ubond_pkt_t) entry;
 } ubond_pkt_t;
 
