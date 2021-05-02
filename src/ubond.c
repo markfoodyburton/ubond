@@ -604,6 +604,7 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     // old_pkts is a ring buffer of the last N packets.
     // The packets may be still held by the stream.
     if (tun->old_pkts[tun->seq % RESENDBUFSIZE]) {
+        tun->old_pkts[tun->seq % RESENDBUFSIZE]->sent_tun=NULL; // remove from this tun
         if (!tun->old_pkts[tun->seq % RESENDBUFSIZE]->stream) {
             ubond_pkt_release(tun->old_pkts[tun->seq % RESENDBUFSIZE]);
         }
