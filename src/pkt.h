@@ -33,7 +33,7 @@ enum {
     UBOND_PKT_RESEND,
     UBOND_PKT_TCP_OPEN,
     UBOND_PKT_TCP_CLOSE,
-    UBOND_PKT_TCP_DATA
+    UBOND_PKT_TCP_DATA,
 };
 
 
@@ -74,15 +74,11 @@ inline void htobe_proto(ubond_proto_t *proto)
 
 typedef struct ubond_pkt_t
 {
-  //put a stream pointer here - 
-  //split data_seq into in/out - fill in the out with the latest recieved in 'in-order' seq ID.
-  //On reciept, if the send queue is empty, send an empty data packet. If there is stuff in the queue, dont bother.
-  //send 0 to say "send again", and start again on the last known good.
-
-
+  struct stream_t *stream;  // for sent packets, point to stream if held by TCP stream.
+  struct ubond_tunnel_s *sent_tun; // point to tun if it's held in old_pkts list
 
   ubond_proto_t p;
-  ev_tstamp timestamp;
+  ev_tstamp sent_time;
   uint16_t len; // wire read length
   TAILQ_ENTRY(ubond_pkt_t) entry;
 } ubond_pkt_t;
@@ -109,7 +105,7 @@ typedef struct ubond_pkt_challenge
 #define UBOND_TAILQ_INSERT_BEFORE(lst_, elm, l) do{TAILQ_INSERT_BEFORE(elm, l, entry);(lst_)->length++;}while(0)
 #define UBOND_TAILQ_REMOVE(lst_, l) do{TAILQ_REMOVE(&((lst_)->list), l, entry);(lst_)->length--;}while(0)
 #define UBOND_TAILQ_FOREACH(l, lst_) TAILQ_FOREACH(l, &((lst_)->list), entry)
-#define UBOND_TAILQ_FOREACH_REVERSE(l, lst_) TAILQ_FOREACH(l, &((lst_)->list), list_t, entry)
+#define UBOND_TAILQ_FOREACH_REVERSE(l, lst_) TAILQ_FOREACH_REVERSE(l, &((lst_)->list), list_t, entry)
 #define UBOND_TAILQ_EMPTY(lst_) TAILQ_EMPTY(&((lst_)->list))
 #define UBOND_TAILQ_FIRST(lst_) TAILQ_FIRST(&((lst_)->list))
 #define UBOND_TAILQ_LAST(lst_) TAILQ_LAST(&((lst_)->list), list_t)

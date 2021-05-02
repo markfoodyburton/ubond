@@ -53,7 +53,7 @@
 /* Number of packets in the queue. Each pkt is ~ 1520 */
 /* 1520 * 128 ~= 24 KBytes of data maximum per channel VMSize */
 #define PKTBUFSIZE 1024
-#define RESENDBUFSIZE 10240
+#define RESENDBUFSIZE 1024
 
 /* tuntap interface name size */
 #ifndef IFNAMSIZ

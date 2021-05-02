@@ -410,8 +410,8 @@ void ubond_control_write_status(struct ubond_control *ctrl)
         tuntap.devname,
         bandwidth,
 //                   (double) UBOND_TAILQ_LENGTH(&send_buffer),
-        ubond_reorder_length(),
-        ubond_total_loss(),
+        1,//ubond_reorder_length(),
+        1,//ubond_total_loss(),
         pool_out
     );
     ubond_control_write(ctrl, buf, ret);

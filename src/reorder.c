@@ -40,9 +40,101 @@
 
 #include "log.h"
 #include "pkt.h"
-#include "ubond.h"
 #include "socks.h"
+#include "ubond.h"
 
+#define MAX_REORDERBUF 1024
+#define MIN_REORDERBUF 20
+#define REORDER_TIMEOUT 0.1
+/* The reorder buffer data structure itself */
+struct ubond_reorder_buffer {
+    uint16_t next; /* current offset in the buffer */
+    ubond_pkt_t* buffer[MAX_REORDERBUF];
+    int size;
+    ev_tstamp waiting_since;
+};
+static struct ubond_reorder_buffer reorder_buffer;
+static ev_timer reorder_timeout_tick;
+extern void ubond_rtun_inject_tuntap(ubond_pkt_t* pkt);
+extern struct ev_loop* loop;
+
+void ubond_reorder_enable()
+{
+}
+
+extern float max_size_outoforder;
+inline int max_size()
+{
+    if (max_size_outoforder < MIN_REORDERBUF)
+        return MIN_REORDERBUF;
+    if (max_size_outoforder > MAX_REORDERBUF)
+        return MAX_REORDERBUF;
+
+    return max_size_outoforder;
+}
+void deliver()
+{
+    while (reorder_buffer.size && reorder_buffer.buffer[reorder_buffer.next] || reorder_buffer.size >= max_size()) {
+        if (reorder_buffer.buffer[reorder_buffer.next]) {
+            ubond_rtun_inject_tuntap(reorder_buffer.buffer[reorder_buffer.next]);
+            ubond_pkt_release(reorder_buffer.buffer[reorder_buffer.next]);
+        }
+        reorder_buffer.buffer[reorder_buffer.next] = NULL;
+        reorder_buffer.next = (reorder_buffer.next + 1) % MAX_REORDERBUF;
+        reorder_buffer.size--;
+    }
+}
+void ubond_reorder_tick(EV_P_ ev_timer* w, int revents)
+{
+    ev_tstamp now = ev_now(EV_DEFAULT_UC);
+    if (reorder_buffer.size && reorder_buffer.waiting_since && ((now - reorder_buffer.waiting_since) > REORDER_TIMEOUT)) {
+        /* skip */
+        while (reorder_buffer.buffer[reorder_buffer.next] == NULL) {
+            reorder_buffer.next = (reorder_buffer.next + 1) % MAX_REORDERBUF;
+        }
+        deliver();
+    }
+}
+void ubond_reorder_reset()
+{
+    memset(&reorder_buffer, 0, sizeof(struct ubond_reorder_buffer));
+}
+void ubond_reorder_init()
+{
+    ubond_reorder_reset();
+    ev_timer_init(&reorder_timeout_tick, &ubond_reorder_tick, 0.0, 0.25);
+    ev_timer_start(EV_A_ & reorder_timeout_tick);
+}
+
+void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
+{
+    if (pkt->p.flow_id) {
+        fatalx("Can not re-order TCP stream");
+    }
+    if (!pkt->p.data_seq) {
+        ubond_rtun_inject_tuntap(pkt);
+        ubond_pkt_release(pkt);
+        return;
+    }
+
+    if (reorder_buffer.buffer[pkt->p.data_seq % MAX_REORDERBUF]) {
+        log_warnx("reorder_buffer", "old seq number?");
+        ubond_rtun_inject_tuntap(pkt);
+        ubond_pkt_release(pkt);
+        return;
+    }
+    reorder_buffer.buffer[pkt->p.data_seq % MAX_REORDERBUF] = pkt;
+    reorder_buffer.size++;
+
+    deliver();
+    if (reorder_buffer.size) {
+        reorder_buffer.waiting_since = ev_now(EV_DEFAULT_UC);
+    } else {
+        reorder_buffer.waiting_since = 0;
+    }
+}
+
+#if 0
 /* The reorder buffer data structure itself */
 struct ubond_reorder_buffer {
     uint64_t min_seqn; /**< Lowest seq. number that can be in the buffer */
@@ -220,7 +312,11 @@ void ubond_reorder_enable()
 {
     reorder_buffer->enabled = 1;
 }
-extern int is_tcp(ubond_pkt_t *pkt);
+
+wouldnt this be better as just a e.g .1024 array - if you hit within the last 1024, great, if not forget it equally - keep track of which tunnels have new thing, when all tunnels have at least e.g .2, then we can be sure its a loss, and we should just move on.
+
+                                                                                                                                                                                                                                             extern int
+                                                                                                                                                                                                                                             is_tcp(ubond_pkt_t*pkt);
 void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
     struct ubond_reorder_buffer* b = reorder_buffer;
@@ -401,3 +497,4 @@ void ubond_reorder_drain()
         }
     }
 }
+#endif
