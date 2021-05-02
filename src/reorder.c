@@ -111,20 +111,20 @@ void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     if (pkt->p.flow_id) {
         fatalx("Can not re-order TCP stream");
     }
-    if (!pkt->p.tun_seq) {
+    if (!pkt->p.data_seq) {
         log_warnx("reorder_buffer", "No tun sequence\n");
         ubond_rtun_inject_tuntap(pkt);
-        ubond_pkt_release(pkt);
+        // the tuntap will retire the packet when done
         return;
     }
 
-    if (reorder_buffer.buffer[pkt->p.tun_seq % MAX_REORDERBUF]) {
+    if (reorder_buffer.buffer[pkt->p.data_seq % MAX_REORDERBUF]) {
         log_warnx("reorder_buffer", "old seq number?");
         ubond_rtun_inject_tuntap(pkt);
-        ubond_pkt_release(pkt);
+        // the tuntap will retire the packet when done
         return;
     }
-    reorder_buffer.buffer[pkt->p.tun_seq % MAX_REORDERBUF] = pkt;
+    reorder_buffer.buffer[pkt->p.data_seq % MAX_REORDERBUF] = pkt;
     reorder_buffer.size++;
 
     deliver();
