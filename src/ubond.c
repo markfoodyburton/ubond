@@ -75,7 +75,7 @@ double bandwidth = 0;
 uint64_t out_resends = 0;
 
 double srtt_min = 0;
-float max_size_outoforder=20;
+float max_size_outoforder = 20;
 
 ubond_pkt_list_t pool;
 uint64_t pool_out = 0;
@@ -88,11 +88,21 @@ ubond_pkt_t* ubond_pkt_get()
     } else {
         p = malloc(sizeof(struct ubond_pkt_t));
     }
+
+    p->stream = NULL;
+    p->sent_tun = NULL;
+
     pool_out++;
     return p;
 };
 void ubond_pkt_release(ubond_pkt_t* p)
 {
+    if (p->stream) {
+        log_warnx("PKT", "Packet has stream on release?");
+    }
+    if (p->sent_tun) {
+        log_warnx("PKT", "Packet has sent_tun on release?");
+    }
     pool_out--;
     UBOND_TAILQ_INSERT_HEAD(&pool, p);
 }
@@ -361,7 +371,7 @@ ubond_loss_update(ubond_tunnel_t* tun, uint16_t seq)
 
     if (tun->seq_vect & 0x8) // if this isn't set, we suspect a loss.
     {
-            ubond_rtun_request_resend(tun, tun->seq_last - 3, 1);
+        ubond_rtun_request_resend(tun, tun->seq_last - 3, 1);
     }
 }
 
@@ -668,7 +678,8 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         }
 
         // inform the stream
-        if (pkt->stream) tcp_sent(pkt->stream, pkt);
+        if (pkt->stream)
+            tcp_sent(pkt->stream, pkt);
 
         if (wlen != ret) {
             log_warnx("net", "%s write error %d/%u",
@@ -1272,9 +1283,8 @@ void ubond_rtun_status_down(ubond_tunnel_t* t)
             break;
     }
     if (!tun)
-        
 
-    ubond_rtun_recalc_weight();
+        ubond_rtun_recalc_weight();
 
     // hpsbuf has tun specific stuff in it, drop it.
     while (!UBOND_TAILQ_EMPTY(&t->hpsbuf)) {
@@ -1447,9 +1457,9 @@ static ubond_tunnel_t* ubond_find_tun(uint16_t id)
 static void
 ubond_rtun_resend(struct resend_data* d)
 {
-    uint16_t tun_id=be16toh(d->tun_id);
-    uint16_t len=be16toh(d->len);
-    uint16_t seqn_base=be16toh(d->seqn);
+    uint16_t tun_id = be16toh(d->tun_id);
+    uint16_t len = be16toh(d->len);
+    uint16_t seqn_base = be16toh(d->seqn);
     ubond_tunnel_t* loss_tun = ubond_find_tun(tun_id);
     if (!loss_tun)
         return;
@@ -1553,11 +1563,11 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
             }
             t->srtt_av = ((t->srtt_av * 9.0) + t->srtt) / 10.0;
 
-        if (!min_srtt || t->srtt_av < min_srtt)
-            min_srtt = t->srtt_av;
-        if (!max_srtt || t->srtt_av > max_srtt)
-            max_srtt = t->srtt_av;
-    
+            if (!min_srtt || t->srtt_av < min_srtt)
+                min_srtt = t->srtt_av;
+            if (!max_srtt || t->srtt_av > max_srtt)
+                max_srtt = t->srtt_av;
+
             // calc measured bandwidth for INCOMMING
             t->bandwidth_measured = (t->bm_data / 128) * INVERSEBWCALCTIME; // kbits/sec
             t->bm_data = 0;
@@ -1637,7 +1647,6 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
         t->bytes_since_adjust = 0;
         t->last_adjust = now;
     }
-
 
     if (min_srtt && max_srtt) {
         max_size_outoforder = max_srtt / min_srtt;
@@ -1806,8 +1815,8 @@ tuntap_io_event(EV_P_ ev_io* w, int revents)
     if (revents & EV_READ) {
         ubond_pkt_t* pkt;
         while (!ubond_pkt_list_is_full(&send_buffer) && (pkt = ubond_tuntap_read(&tuntap))) {
-            pkt->stream=NULL;
-            pkt->sent_tun=NULL;
+            pkt->stream = NULL;
+            pkt->sent_tun = NULL;
             ubond_buffer_write(&send_buffer, pkt);
             ubond_tunnel_t* t;
             // ev_now_update(EV_DEFAULT_UC);

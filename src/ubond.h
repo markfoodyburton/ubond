@@ -146,7 +146,7 @@ typedef struct ubond_tunnel_s
     uint32_t bindfib;     /* FIB number to use */
     char destaddr[UBOND_MAXHNAMSTR]; /* remote server ip (can be hostname) */
     char destport[UBOND_MAXPORTSTR]; /* remote server port */
-    int id;               /* Unique ID which will be shared between tunnel end
+    uint16_t id;               /* Unique ID which will be shared between tunnel end
                              points (e.g. port number) */
     int fd;               /* socket file descriptor */
     int server_mode;      /* server or client */

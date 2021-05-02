@@ -78,7 +78,6 @@ typedef struct ubond_pkt_t
   struct ubond_tunnel_s *sent_tun; // point to tun if it's held in old_pkts list
 
   ubond_proto_t p;
-  ev_tstamp sent_time;
   uint16_t len; // wire read length
   TAILQ_ENTRY(ubond_pkt_t) entry;
 } ubond_pkt_t;
