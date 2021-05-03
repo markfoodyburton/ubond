@@ -43,7 +43,7 @@
 #include "socks.h"
 #include "ubond.h"
 
-#define MAX_REORDERBUF 1024
+#define MAX_REORDERBUF 0x400
 #define MIN_REORDERBUF 20
 #define REORDER_TIMEOUT 0.1
 /* The reorder buffer data structure itself */
@@ -52,6 +52,8 @@ struct ubond_reorder_buffer {
     ubond_pkt_t* buffer[MAX_REORDERBUF];
     int size;
     ev_tstamp waiting_since;
+
+    uint16_t data_seq;
 };
 static struct ubond_reorder_buffer reorder_buffer;
 static ev_timer reorder_timeout_tick;
@@ -78,10 +80,12 @@ void deliver()
         if (reorder_buffer.buffer[reorder_buffer.next]) {
             ubond_rtun_inject_tuntap(reorder_buffer.buffer[reorder_buffer.next]);
             // the tuntap will retire the packet when done
+            reorder_buffer.buffer[reorder_buffer.next] = NULL;
+            reorder_buffer.size--;
+        } else {
+            log_debug("reorder_buffer", "skipping unrecieved packet (buffer of %d packets, max size %d seq next=0x%x)", reorder_buffer.size, max_size(), reorder_buffer.next);
         }
-        reorder_buffer.buffer[reorder_buffer.next] = NULL;
         reorder_buffer.next = (reorder_buffer.next + 1) % MAX_REORDERBUF;
-        reorder_buffer.size--;
     }
 }
 void ubond_reorder_tick(EV_P_ ev_timer* w, int revents)
@@ -89,21 +93,42 @@ void ubond_reorder_tick(EV_P_ ev_timer* w, int revents)
     ev_tstamp now = ev_now(EV_DEFAULT_UC);
     if (reorder_buffer.size && reorder_buffer.waiting_since && ((now - reorder_buffer.waiting_since) > REORDER_TIMEOUT)) {
         /* skip */
+        int i=0;
         while (reorder_buffer.buffer[reorder_buffer.next] == NULL) {
             reorder_buffer.next = (reorder_buffer.next + 1) % MAX_REORDERBUF;
+            i++;
         }
+        log_debug("reorder_buffer", "timeout skipping %d unrecieved packets", i);
         deliver();
     }
 }
 void ubond_reorder_reset()
 {
-    memset(&reorder_buffer, 0, sizeof(struct ubond_reorder_buffer));
+    while (reorder_buffer.size) {
+        if (reorder_buffer.buffer[reorder_buffer.next]) {
+            ubond_pkt_release(reorder_buffer.buffer[reorder_buffer.next]);
+            // the tuntap will retire the packet when done
+            reorder_buffer.buffer[reorder_buffer.next] = NULL;
+            reorder_buffer.size--;
+        }
+        reorder_buffer.next = (reorder_buffer.next + 1) % MAX_REORDERBUF;
+    }
+    reorder_buffer.data_seq = 0;
+    reorder_buffer.next = 0;
+    reorder_buffer.waiting_since = 0;
 }
 void ubond_reorder_init()
 {
+    memset(&reorder_buffer, 0, sizeof(struct ubond_reorder_buffer));
     ubond_reorder_reset();
     ev_timer_init(&reorder_timeout_tick, &ubond_reorder_tick, 0.0, 0.25);
     ev_timer_start(EV_A_ & reorder_timeout_tick);
+}
+
+uint16_t next_data_seq()
+{
+    uint16_t d = reorder_buffer.data_seq++;
+    return d;
 }
 
 void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
@@ -111,17 +136,22 @@ void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     if (pkt->p.flow_id) {
         fatalx("Can not re-order TCP stream");
     }
-    if (!pkt->p.data_seq) {
-        log_warnx("reorder_buffer", "No tun sequence\n");
-        ubond_rtun_inject_tuntap(pkt);
-        // the tuntap will retire the packet when done
-        return;
-    }
+    //    if (!pkt->p.data_seq) {
+    //        log_warnx("reorder_buffer", "No tun sequence\n");
+    //        ubond_rtun_inject_tuntap(pkt);
+    //        // the tuntap will retire the packet when done
+    //        return;
+    //    }
 
     if (reorder_buffer.buffer[pkt->p.data_seq % MAX_REORDERBUF]) {
-        log_warnx("reorder_buffer", "old seq number?");
-        ubond_rtun_inject_tuntap(pkt);
-        // the tuntap will retire the packet when done
+        if (pkt->p.type == UBOND_PKT_DATA_RESEND) {
+            ubond_pkt_release(pkt); // we have already delivere this packet!
+            log_debug("reorder_buffer", "redundent resend %d", reorder_buffer.size);
+        } else {
+            log_warnx("reorder_buffer", "old seq number? %d", reorder_buffer.size);
+            ubond_rtun_inject_tuntap(pkt);
+            // the tuntap will retire the packet when done
+        }
         return;
     }
     reorder_buffer.buffer[pkt->p.data_seq % MAX_REORDERBUF] = pkt;

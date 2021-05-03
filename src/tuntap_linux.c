@@ -11,7 +11,6 @@
 #include "tool.h"
 #include "pkt.h"
 
-uint16_t data_seq=1;
 ubond_pkt_t *spair=NULL;
 ubond_pkt_t *ubond_tuntap_read(struct tuntap_s *tuntap)
 {
@@ -41,8 +40,6 @@ ubond_pkt_t *ubond_tuntap_read(struct tuntap_s *tuntap)
   p->p.len=ret; // data length
   p->p.type=UBOND_PKT_DATA;
   p->p.flow_id=0;
-  p->p.data_seq=data_seq++;
-  if (data_seq==0) data_seq++;
   return p;
 }
 

@@ -371,6 +371,10 @@ ubond_loss_update(ubond_tunnel_t* tun, uint16_t seq)
     if (seq > tun->seq_last) {
         tun->seq_vect <<= seq - tun->seq_last;
         tun->seq_vect |= 1ull;
+        if (tun->seq_vect & 0x8) // if this isn't set, we suspect a loss.
+        {
+            ubond_rtun_request_resend(tun, tun->seq_last - 3, 1);
+        }
     } else {
         tun->seq_vect |= 1ull << (tun->seq_last - seq);
     }
@@ -378,11 +382,6 @@ ubond_loss_update(ubond_tunnel_t* tun, uint16_t seq)
     int64_t v = tun->seq_vect | 0x8000000000000000ULL; // signed int.
     tun->loss = 64 - count_1s(v >> 2);
     tun->seq_last = seq;
-
-    if (tun->seq_vect & 0x8) // if this isn't set, we suspect a loss.
-    {
-        ubond_rtun_request_resend(tun, tun->seq_last - 3, 1);
-    }
 }
 
 /* read from the rtunnel => write directly to the tap send buffer */
@@ -462,8 +461,8 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
                 memcpy(tun->addrinfo->ai_addr, &clientaddr, addrlen);
             }
         }
-        log_debug("net", "< %s recv %d bytes (size=%d, type=%d, seq=%d)",
-            tun->name, (int)len, pkt->p.len, pkt->p.type, pkt->p.tun_seq);
+        log_debug("net", "< %s recv %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x)",
+            tun->name, (int)len, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq);
 
         if (tun->status >= UBOND_AUTHOK) {
             switch (pkt->p.type) {
@@ -698,7 +697,8 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
             log_warnx("net", "%s write error %d/%u",
                 tun->name, (int)ret, (unsigned int)wlen);
         } else {
-            log_debug("net", "> %s sent %d bytes (size=%d, type=%d, seq=%d)", tun->name, (int)ret, (pkt->p.len), pkt->p.type, (pkt->p.tun_seq));
+            log_debug("net", "> %s sent %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x)",
+                tun->name, (int)ret, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq);
         }
     }
 
@@ -1272,6 +1272,8 @@ ubond_rtun_status_up(ubond_tunnel_t* t)
     while (!UBOND_TAILQ_EMPTY(&t->hpsbuf)) {
         ubond_pkt_release(UBOND_TAILQ_POP_LAST(&t->hpsbuf));
     }
+
+    ubond_reorder_reset(); // reset the re-order buffer,
 }
 
 void ubond_rtun_status_down(ubond_tunnel_t* t)
@@ -1310,7 +1312,8 @@ void ubond_rtun_status_down(ubond_tunnel_t* t)
     }
     // for the normal buffer, lets request resends of all possible packets from
     // the last one we recieved
-    ubond_rtun_request_resend(t, t->seq_last, RESENDBUFSIZE);
+    //ubond_rtun_request_resend(t, t->seq_last, RESENDBUFSIZE);
+    // no point in asking for stuff, it will already have been asked fro
 
     ubond_update_status();
     update_process_title();
@@ -1437,6 +1440,9 @@ ubond_rtun_send_auth(ubond_tunnel_t* t)
 static void
 ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint16_t tun_seqn, uint16_t len)
 {
+    if (ubond_pkt_list_is_full(&hpsend_buffer))
+        return;
+
     ubond_pkt_t* pkt;
     pkt = ubond_pkt_get();
 
@@ -1453,7 +1459,7 @@ ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint16_t tun_seqn, uint16_t 
     out_resends += len;
     ubond_buffer_write(&hpsend_buffer, pkt);
 
-    log_debug("resend", "Request resend %lu (lost from tunnel %s)", /* t->name,*/ tun_seqn, loss_tun->name);
+    log_debug("resend", "Request resend 0x%x (lost from tunnel %s)", /* t->name,*/ tun_seqn, loss_tun->name);
 }
 
 static ubond_tunnel_t* ubond_find_tun(uint16_t id)
@@ -1476,6 +1482,8 @@ ubond_rtun_resend(struct resend_data* d)
     ubond_tunnel_t* loss_tun = ubond_find_tun(tun_id);
     if (!loss_tun)
         return;
+
+    // redundent?
     if (len > RESENDBUFSIZE / 4) {
         if (loss_tun->status >= UBOND_AUTHOK) {
             log_info("rtt", "%s resend request reached threashold: %d/%d", loss_tun->name, len, RESENDBUFSIZE / 4);
@@ -1483,25 +1491,23 @@ ubond_rtun_resend(struct resend_data* d)
             loss_tun->sent_loss = 100.0; //tun->loss_tollerence
         }
     }
-
-    for (int i = 0; i < len; i++) {
+    for (int i = 0; i < len; i++)
+    {
+        if (ubond_pkt_list_is_full(&hpsend_buffer))
+            break;
         uint16_t seqn = seqn_base + i;
         ubond_pkt_t* old_pkt = loss_tun->old_pkts[seqn % RESENDBUFSIZE];
         if (old_pkt && old_pkt->p.tun_seq == seqn) {
-            if (old_pkt->p.type != UBOND_PKT_DATA || is_tcp(old_pkt) /*|| old_pkt->p.data[9]==17*/) { // only send tcp, e.g. refuse UDP packets!
-                ubond_buffer_write(&hpsend_buffer, old_pkt);
-                loss_tun->old_pkts[seqn % RESENDBUFSIZE] = NULL; // remove this from the old list
-                if (old_pkt->p.type == UBOND_PKT_DATA)
-                    old_pkt->p.type = UBOND_PKT_DATA_RESEND;
-                log_debug("resend", "resend packet (tun seq: %lu tun seq %lu) previously sent on %s", /*t->name,*/ seqn, old_pkt->p.tun_seq, loss_tun->name);
-            } else {
-                log_debug("resend", "Wont resent packet (tun seq: %lu tun seq %lu) of type %d", seqn, old_pkt->p.tun_seq, (unsigned char)old_pkt->p.data[6]);
-            }
+            ubond_buffer_write(&hpsend_buffer, old_pkt);
+            loss_tun->old_pkts[seqn % RESENDBUFSIZE] = NULL; // remove this from the old list
+            if (old_pkt->p.type == UBOND_PKT_DATA)
+                old_pkt->p.type = UBOND_PKT_DATA_RESEND;
+            log_debug("resend", "resend packet (tun seq: 0x%x tun seq %0x%x) previously sent on %s", /*t->name,*/ seqn, old_pkt->p.tun_seq, loss_tun->name);
         } else {
             if (old_pkt) {
-                log_debug("resend+", "unable to resend seq %lu (Not Found - replaced by %lu)", seqn, old_pkt->p.tun_seq);
+                log_debug("resend", "unable to resend seq 0x%x (Not Found - replaced by 0x%x)", seqn, old_pkt->p.tun_seq);
             } else {
-                log_debug("resend+", "unable to resend seq %lu (Not Found - empty slot)", seqn);
+                log_debug("resend", "unable to resend seq 0x%x (Not Found - empty slot)", seqn);
             }
         }
     }
@@ -1761,7 +1767,8 @@ ubond_rtun_check_lossy(ubond_tunnel_t* tun)
     if (!keepalive_ok && tun->status == UBOND_AUTHOK) {
         log_info("rtt", "%s keepalive reached threashold, last activity recieved %fs ago", tun->name, now - tun->last_activity);
         tun->status = UBOND_LOSSY;
-        ubond_rtun_request_resend(tun, tun->seq_last, RESENDBUFSIZE);
+        //ubond_rtun_request_resend(tun, tun->seq_last, RESENDBUFSIZE);
+        // no point in asking for stuff, it will already have ben asked for...
         // We wont mark the tunnel down yet (hopefully it will come back again, and
         // coming back from a loss is quicker than pulling it down etc. However,
         // here, we fear the worst, and will ask for all packets again. Lets hope
@@ -1830,6 +1837,7 @@ tuntap_io_event(EV_P_ ev_io* w, int revents)
         while (!ubond_pkt_list_is_full(&send_buffer) && (pkt = ubond_tuntap_read(&tuntap))) {
             pkt->stream = NULL;
             pkt->sent_tun = NULL;
+            pkt->p.data_seq = next_data_seq(); // this is normal data, not tcp data
             ubond_buffer_write(&send_buffer, pkt);
             ubond_tunnel_t* t;
             // ev_now_update(EV_DEFAULT_UC);
