@@ -375,7 +375,9 @@ ubond_loss_update(ubond_tunnel_t* tun, uint16_t seq)
         tun->seq_vect |= 1ull;
         if ((tun->seq_vect & (1ull<<3))==0) // if this isn't set, we suspect a loss.
         {
-            ubond_rtun_request_resend(tun, seq - 3, 1);
+            if (d>=3) {
+            ubond_rtun_request_resend(tun, seq - d, d-1);
+            }
         }
     } else {
         tun->seq_vect |= 1ull << (-d);
@@ -394,7 +396,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
     ssize_t len;
     struct sockaddr_storage clientaddr;
     socklen_t addrlen = sizeof(clientaddr);
-    do {
+//    do {
         ubond_pkt_t* pkt = ubond_pkt_get();
         len = recvfrom(tun->fd, &(pkt->p),
             sizeof(pkt->p),
@@ -405,13 +407,13 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
                 ubond_rtun_status_down(tun);
             }
             ubond_pkt_release(pkt);
-            break;
+            return;
         }
         if (len == 0) {
             log_info("protocol", "%s peer closed the connection", tun->name);
             ubond_rtun_status_down(tun);
             ubond_pkt_release(pkt);
-            break;
+            return;
         }
         betoh_proto(&(pkt->p));
 
@@ -421,7 +423,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
         if (ubond_protocol_read(tun, pkt) < 0) {
             log_info("protocol", "Protocol error");
             ubond_pkt_release(pkt);
-            break;
+            return;
             //            return;
         }
 
@@ -445,7 +447,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
                     tun->name);
                 ubond_rtun_status_down(tun);
                 ubond_pkt_release(pkt);
-                break;
+                return;
             }
             char clienthost[NI_MAXHOST];
             char clientport[NI_MAXSERV];
@@ -544,7 +546,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
             }
             ubond_pkt_release(pkt);
         }
-    } while (1);
+//    } while (1);
 }
 
 static int
@@ -643,8 +645,8 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     pkt->len = wlen;
 
     // significant time can have elapsed, so maybe better use the current time
-    // rather than... uint64_t now64 = ubond_timestamp64(ev_now(EV_DEFAULT_UC));
-    uint64_t now64 = ubond_timestamp64(ev_time());
+    // rather than... uint64_t now64 = ubond_timestamp64(ev_now(EV_DEFAULT_UC)); instead of ev_time()
+    uint64_t now64 = ubond_timestamp64(ev_now(EV_DEFAULT_UC));
     /* we have a recent received timestamp */
     if (tun->saved_timestamp != -1) {
         if (now64 - tun->saved_timestamp_received_at < 1000) {
@@ -1422,7 +1424,7 @@ ubond_rtun_send_auth_ok(ubond_tunnel_t* t)
     pkt->p.len = sizeof(ubond_pkt_challenge);
 
     pkt->p.type = UBOND_PKT_AUTH_OK;
-    t->status = UBOND_AUTHSENT;
+    t->status = UBOND_AUTHOK;
     ubond_rtun_do_send(t, 0);
     log_info("protocol", "%s sending authenticate OK", t->name);
 }
@@ -1541,8 +1543,8 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
     bandwidth = ((bandwidth * 9.0) + (((double)bandwidthdata / 128.0) / diff)) / 10.0;
     bandwidthdata = 0;
 
-    int max_srtt = 0;
-    int min_srtt = 0;
+    float max_srtt = 0;
+    float min_srtt = 0;
 
     ubond_tunnel_t* t;
     int tuns = 0;
@@ -1811,7 +1813,7 @@ ubond_rtun_check_timeout(EV_P_ ev_timer* w, int revents)
             ubond_rtun_status_down(t);
         }
     }
-    if (t->status < UBOND_AUTHOK) {
+    if (t->status != UBOND_AUTHOK) {
         ubond_rtun_tick_connect(t);
     } else {
         ubond_rtun_send_keepalive(now, t);

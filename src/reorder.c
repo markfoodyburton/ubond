@@ -83,7 +83,7 @@ void deliver()
             reorder_buffer.buffer[reorder_buffer.next] = NULL;
             reorder_buffer.size--;
         } else {
-            log_debug("reorder_buffer", "skipping unrecieved packet (buffer of %d packets, max size %d seq next=0x%x)", reorder_buffer.size, max_size(), reorder_buffer.next);
+            log_debug("reorder_buffer", "skipping unrecieved packet (buffer of %d packets, max size %d seq next=0x%x) srtt factor %f", reorder_buffer.size, max_size(), reorder_buffer.next, max_size_outoforder);
         }
         reorder_buffer.next = (reorder_buffer.next + 1) % MAX_REORDERBUF;
     }
@@ -154,9 +154,14 @@ void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         }
         return;
     }
+    if ((int16_t)(pkt->p.data_seq - reorder_buffer.next)>=0) {
+    // if we have chosen to 'skip' some time ago, and your filling in 'behind' - then this is basically going to become an old packet,
+//    meantime the 'size' is wrong.... and well end up screwed
     reorder_buffer.buffer[pkt->p.data_seq % MAX_REORDERBUF] = pkt;
     reorder_buffer.size++;
-
+    } else {
+        log_warnx("reorder_buffer", "old seq number? size %d data seq 0x%x", reorder_buffer.size,  pkt->p.data_seq);  
+    }
     deliver();
     if (reorder_buffer.size) {
         reorder_buffer.waiting_since = ev_now(EV_DEFAULT_UC);
