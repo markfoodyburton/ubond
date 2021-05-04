@@ -219,7 +219,7 @@ static void ubond_rtun_send_disconnect(ubond_tunnel_t* t);
 static int ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt);
 static void ubond_rtun_resend(struct resend_data* d);
 static void ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint16_t tun_seqn, uint16_t len);
-static void ubond_rtun_send_auth(ubond_tunnel_t* t);
+static void ubond_rtun_send_auth_ok(ubond_tunnel_t* t);
 static void ubond_rtun_tuntap_up();
 static void ubond_rtun_status_up(ubond_tunnel_t* t);
 static void ubond_rtun_tick_connect(ubond_tunnel_t* t);
@@ -361,22 +361,24 @@ inline int count_1s(uint64_t b)
 static void
 ubond_loss_update(ubond_tunnel_t* tun, uint16_t seq)
 {
-    if (seq >= tun->seq_last + 64) {
+    int16_t d=(int16_t)(seq - tun->seq_last);
+
+    if (abs(d)>=60) {
         /* consider a connection reset. */
         tun->seq_vect = (uint64_t)-1;
         tun->seq_last = seq;
         tun->loss = 0;
         return;
     }
-    if (seq > tun->seq_last) {
-        tun->seq_vect <<= seq - tun->seq_last;
+    if (d > 0) {
+        tun->seq_vect <<= d;
         tun->seq_vect |= 1ull;
-        if (tun->seq_vect & 0x8) // if this isn't set, we suspect a loss.
+        if ((tun->seq_vect & (1ull<<3))==0) // if this isn't set, we suspect a loss.
         {
-            ubond_rtun_request_resend(tun, tun->seq_last - 3, 1);
+            ubond_rtun_request_resend(tun, seq - 3, 1);
         }
     } else {
-        tun->seq_vect |= 1ull << (tun->seq_last - seq);
+        tun->seq_vect |= 1ull << (-d);
     }
     // according to RFC 3208 you can target the last two packets being out of order
     int64_t v = tun->seq_vect | 0x8000000000000000ULL; // signed int.
@@ -466,13 +468,14 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
 
         if (tun->status >= UBOND_AUTHOK) {
             switch (pkt->p.type) {
-            case UBOND_PKT_DATA:
             case UBOND_PKT_DATA_RESEND:
+                log_debug("resend","recieved resent packet");
+            case UBOND_PKT_DATA:
                 ubond_rtun_tick(tun);
                 ubond_reorder_insert(tun, pkt);
                 break;
             case UBOND_PKT_KEEPALIVE:
-                log_debug("protocol", "%s keepalive received", tun->name);
+                log_debug("protocolx", "%s keepalive received", tun->name);
                 ubond_rtun_tick(tun);
                 uint64_t bw = 0;
                 sscanf(pkt->p.data, "%lu", &bw);
@@ -502,7 +505,8 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
                 ubond_stream_write(pkt);
                 break;
             case UBOND_PKT_AUTH:
-                ubond_rtun_send_auth(tun);
+                // we are already authenticated
+                //                ubond_rtun_send_auth(tun);
             case UBOND_PKT_AUTH_OK:
                 break;
             default:
@@ -512,7 +516,6 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
 
         } else {
             if (pkt->p.type == UBOND_PKT_AUTH || pkt->p.type == UBOND_PKT_AUTH_OK) {
-                // recieve any quota info, if there is any
                 ubond_rtun_tick(tun);
 
                 ubond_pkt_challenge* challenge = (ubond_pkt_challenge*)(pkt->p.data);
@@ -525,17 +528,21 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
                 if (strcmp(challenge->password, ubond_options.password) != 0) {
                     log_warnx("password", "Invalid password");
                 } else {
+                    log_debug("protocol", "%s authenticated", tun->name);
+                    ubond_rtun_status_up(tun);
+
                     int64_t perm = challenge->permitted;
                     if (perm > tun->permitted)
                         tun->permitted = perm;
 
-                    ubond_rtun_send_auth(tun);
+                    if (tun->server_mode) {
+                        ubond_rtun_send_auth_ok(tun); // send OK to client
+                    }
                 }
             } else {
-                log_debug("protocol", "%s ignoring non authenticated packet",
-                    tun->name);
-                ubond_pkt_release(pkt);
+                log_debug("protocol", "%s ignoring non authenticated packet", tun->name);
             }
+            ubond_pkt_release(pkt);
         }
     } while (1);
 }
@@ -1394,47 +1401,30 @@ ubond_rtun_challenge_send(ubond_tunnel_t* t)
 }
 
 static void
-ubond_rtun_send_auth(ubond_tunnel_t* t)
+ubond_rtun_send_auth_ok(ubond_tunnel_t* t)
 {
     ubond_pkt_t* pkt;
-    if (t->server_mode) {
-        /* server side */
-        if (t->status == UBOND_DISCONNECTED || t->status >= UBOND_AUTHOK) {
-            ubond_rtun_tick(t);
-            ubond_rtun_status_up(t); // mark this as up, before trying to send
-            // somethign on it !
 
-            if (ubond_pkt_list_is_full(&t->hpsbuf)) {
-                log_warnx("net", "%s high priority buffer: overflow", t->name);
-            }
-            pkt = ubond_pkt_get();
-            ubond_pkt_insert(&t->hpsbuf, pkt);
-
-            ubond_pkt_challenge challenge = {
-                UBOND_CHALLENGE_OK,
-                htobe16(UBOND_PROTOCOL_VERSION),
-                htobe64((t->quota) ? t->permitted : 0),
-            };
-            strcpy(challenge.password, ubond_options.password);
-
-            *(ubond_pkt_challenge*)(pkt->p.data) = challenge;
-            pkt->p.len = sizeof(ubond_pkt_challenge);
-
-            pkt->p.type = UBOND_PKT_AUTH_OK;
-            if (t->status < UBOND_AUTHOK)
-                t->status = UBOND_AUTHSENT;
-            ubond_rtun_do_send(t, 0);
-            log_debug("protocol", "%s sending 'OK'", t->name);
-            log_info("protocol", "%s authenticated", t->name);
-        }
-    } else {
-        /* client side */
-        if (t->status == UBOND_AUTHSENT) {
-            log_info("protocol", "%s authenticated", t->name);
-            ubond_rtun_tick(t);
-            ubond_rtun_status_up(t);
-        }
+    if (ubond_pkt_list_is_full(&t->hpsbuf)) {
+        log_warnx("net", "%s high priority buffer: overflow", t->name);
     }
+    pkt = ubond_pkt_get();
+    ubond_pkt_insert(&t->hpsbuf, pkt);
+
+    ubond_pkt_challenge challenge = {
+        UBOND_CHALLENGE_OK,
+        htobe16(UBOND_PROTOCOL_VERSION),
+        htobe64((t->quota) ? t->permitted : 0),
+    };
+    strcpy(challenge.password, ubond_options.password);
+
+    *(ubond_pkt_challenge*)(pkt->p.data) = challenge;
+    pkt->p.len = sizeof(ubond_pkt_challenge);
+
+    pkt->p.type = UBOND_PKT_AUTH_OK;
+    t->status = UBOND_AUTHSENT;
+    ubond_rtun_do_send(t, 0);
+    log_info("protocol", "%s sending authenticate OK", t->name);
 }
 
 static void
@@ -1491,8 +1481,7 @@ ubond_rtun_resend(struct resend_data* d)
             loss_tun->sent_loss = 100.0; //tun->loss_tollerence
         }
     }
-    for (int i = 0; i < len; i++)
-    {
+    for (int i = 0; i < len; i++) {
         if (ubond_pkt_list_is_full(&hpsend_buffer))
             break;
         uint16_t seqn = seqn_base + i;
@@ -1502,7 +1491,7 @@ ubond_rtun_resend(struct resend_data* d)
             loss_tun->old_pkts[seqn % RESENDBUFSIZE] = NULL; // remove this from the old list
             if (old_pkt->p.type == UBOND_PKT_DATA)
                 old_pkt->p.type = UBOND_PKT_DATA_RESEND;
-            log_debug("resend", "resend packet (tun seq: 0x%x tun seq %0x%x) previously sent on %s", /*t->name,*/ seqn, old_pkt->p.tun_seq, loss_tun->name);
+            log_debug("resend", "resend packet (tun seq: 0x%x) previously sent on %s", seqn, loss_tun->name);
         } else {
             if (old_pkt) {
                 log_debug("resend", "unable to resend seq 0x%x (Not Found - replaced by 0x%x)", seqn, old_pkt->p.tun_seq);
@@ -1731,7 +1720,7 @@ ubond_rtun_send_keepalive(ev_tstamp now, ubond_tunnel_t* t)
     if (ubond_pkt_list_is_full(&t->hpsbuf))
         log_warnx("net", "%s high priority buffer: overflow", t->name);
     else {
-        log_debug("protocol", "%s sending keepalive", t->name);
+        log_debug("protocolx", "%s sending keepalive", t->name);
         pkt = ubond_pkt_get();
         ubond_pkt_insert(&t->hpsbuf, pkt);
         pkt->p.type = UBOND_PKT_KEEPALIVE;

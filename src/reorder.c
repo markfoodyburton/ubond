@@ -148,7 +148,7 @@ void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
             ubond_pkt_release(pkt); // we have already delivere this packet!
             log_debug("reorder_buffer", "redundent resend %d", reorder_buffer.size);
         } else {
-            log_warnx("reorder_buffer", "old seq number? %d", reorder_buffer.size);
+            log_warnx("reorder_buffer", "old seq number? size %d old data seq 0x%x new data seq 0x%x", reorder_buffer.size, reorder_buffer.buffer[pkt->p.data_seq % MAX_REORDERBUF]->p.data_seq, pkt->p.data_seq);
             ubond_rtun_inject_tuntap(pkt);
             // the tuntap will retire the packet when done
         }
