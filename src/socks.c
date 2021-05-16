@@ -81,20 +81,24 @@ static void ubond_stream_close(stream_t* s)
     if (ev_is_active(&s->io_read)) {
         ev_io_stop(EV_DEFAULT_ & s->io_read);
     }
+    if (ev_is_active(&s->io_write)) {
+        ev_io_stop(EV_DEFAULT_ & s->io_write);
+    }
     close(s->fd);
 
-    while (1) {
+    while (!UBOND_TAILQ_EMPTY(&s->sent)) {
         ubond_pkt_t* l = UBOND_TAILQ_FIRST(&s->sent);
-        if (!l)
-            break;
         UBOND_TAILQ_REMOVE(&s->sent, l);
         ubond_pkt_release(l);
     }
-    while (1) {
+    while (!UBOND_TAILQ_EMPTY(&s->received)) {
         ubond_pkt_t* l = UBOND_TAILQ_FIRST(&s->received);
-        if (!l)
-            break;
         UBOND_TAILQ_REMOVE(&s->received, l);
+        ubond_pkt_release(l);
+    }
+    while (!UBOND_TAILQ_EMPTY(&s->draining)) {
+        ubond_pkt_t* l = UBOND_TAILQ_FIRST(&s->draining);
+        UBOND_TAILQ_REMOVE(&s->draining, l);
         ubond_pkt_release(l);
     }
 
@@ -111,10 +115,10 @@ static void ubond_stream_close(stream_t* s)
 int paused = 0;
 void activate_streams()
 {
-    if (paused == 0 || ubond_pkt_list_is_full(&send_buffer))
+    if (paused == 0 || ubond_pkt_list_is_full_watermark(&send_buffer))
         return;
     else {
-        //printf("Activate\n");
+        printf("Activate\n");
         stream_t* l;
         UBOND_TAILQ_FOREACH(l, &active)
         {
@@ -128,7 +132,7 @@ void activate_streams()
 
 void pause_streams()
 {
-    //printf("Pause\n");
+    printf("Pause\n");
     stream_t* l;
     UBOND_TAILQ_FOREACH(l, &active)
     {
@@ -154,34 +158,68 @@ stream_t* find(ubond_pkt_t* pkt)
 void send_pkt_tun(stream_t* s, ubond_pkt_t* pkt, uint16_t type)
 {
     pkt->stream = s;
-    pkt->sent_tun = NULL;
-    pkt->p.data_seq = s->data_seq++;
+    //pkt->sent_tun = NULL;
+    if (type == UBOND_PKT_TCP_ACK) {
+        pkt->p.data_seq = 0;
+    } else {
+        pkt->p.data_seq = s->data_seq++;
+    }
+
     pkt->p.flow_id = s->flow_id;
     pkt->p.type = type;
 
     pkt->p.ack_seq = s->seq_to_ack; // stamp the last delivered pack ack
     s->sending++;
 
+    log_debug("tcp", "Sending package %d to tunnel (ack %d type %d len %d)", pkt->p.data_seq, pkt->p.ack_seq, pkt->p.type, pkt->p.len);
+
     ubond_buffer_write(&send_buffer, pkt);
+    if (ubond_pkt_list_is_full(&send_buffer)) {
+        log_warnx("tcp", "Send buffer is full !");
+    }
+}
+
+void stamp(stream_t* s)
+{
+    ubond_pkt_t* l;
+    UBOND_TAILQ_FOREACH_REVERSE(l, &send_buffer)
+    {
+        if (l->p.type == UBOND_PKT_TCP_DATA || l->p.type == UBOND_PKT_TCP_ACK) {
+            l->p.ack_seq = s->seq_to_ack;
+            return;
+        }
+    }
+    ubond_pkt_t* p = ubond_pkt_get();
+    p->p.len = 0;
+    send_pkt_tun(s, p, UBOND_PKT_TCP_ACK);
 }
 
 void resend(stream_t* s)
 {
+    return;
     ubond_pkt_t* l = UBOND_TAILQ_FIRST(&s->sent);
+    if (ubond_pkt_list_is_full(&send_buffer)) {
+        log_warnx("tcp", "Send buffer is full !");
+        return;
+    }
+
+    log_debug("tcp", "Resend as we have no ack %d package in sent list", l->p.ack_seq);
 
     /* remove it from the old tunnel */
-    if (l->sent_tun) { // tun may be keeping it
-        l->sent_tun->old_pkts[l->p.tun_seq % RESENDBUFSIZE] = NULL;
-        l->sent_tun = NULL;
-    }
+    //    if (l->sent_tun) { // tun may be keeping it
+    //        l->sent_tun->old_pkts[l->p.tun_seq % RESENDBUFSIZE] = NULL;
+    //        l->sent_tun = NULL;
+    //    }
     l->p.ack_seq = s->seq_to_ack; // restamp the uptodate ack
     s->sending++;
-    ubond_buffer_write(&send_buffer, l);
+    ubond_buffer_write(&hpsend_buffer, l);
 }
 
 // could be client or server
 void ubond_stream_write(ubond_pkt_t* pkt)
 {
+    log_debug("tcp", "Recieved packet %d (type %d, length %d) from tunnel", pkt->p.data_seq, pkt->p.type, pkt->p.len);
+
     stream_t* s = find(pkt);
     if (!s)
         return;
@@ -192,18 +230,19 @@ void ubond_stream_write(ubond_pkt_t* pkt)
 
     /* first check off the things from the 'sent' queue */
     int acks = 0;
-    while (1) {
+    while (!UBOND_TAILQ_EMPTY(&s->sent)) {
         ubond_pkt_t* l = UBOND_TAILQ_FIRST(&s->sent);
         if (l && aoldereqb(l->p.data_seq, pkt->p.ack_seq)) {
             UBOND_TAILQ_REMOVE(&s->sent, l);
-            if (l->sent_tun) // tun may be keeping it
-            {
-                // we do not need this packet to be re-sent it's been ACK'd
-                l->sent_tun->old_pkts[l->p.tun_seq % RESENDBUFSIZE] = NULL;
-                l->sent_tun = NULL;
-                l->stream = NULL;
-            }
+            //            if (l->sent_tun) // tun may be keeping it
+            //            {
+            //                // we do not need this packet to be re-sent it's been ACK'd
+            //                l->sent_tun->old_pkts[l->p.tun_seq % RESENDBUFSIZE] = NULL;
+            //        l->sent_tun = NULL;
+            l->stream = NULL;
+            //            }
             acks++;
+            log_debug("tcp", "Found ACK'd package %d (ack to %d) in sent list", l->p.data_seq, pkt->p.ack_seq);
             ubond_pkt_release(l);
             if (l->p.type == UBOND_PKT_TCP_CLOSE) {
                 ubond_stream_close(s);
@@ -214,12 +253,11 @@ void ubond_stream_write(ubond_pkt_t* pkt)
             }
 
         } else {
-            log_warnx("tcp", "Unable to find ACK package in sent list");
+            log_debug("tcp", "Unable to find ACK %d package in sent list", pkt->p.ack_seq);
             break;
         }
     }
-    if (!acks && s->sent.length > max_size_outoforder + 1) { // round max_size up.
-        ubond_pkt_t* l = UBOND_TAILQ_FIRST(&s->sent);
+    if (!acks && s->sent.length > (max_size_outoforder * 10) + 1) { // round max_size up.
         resend(s);
     }
     if (s->sent.length < TCP_MAX_OUTSTANDING) {
@@ -228,53 +266,61 @@ void ubond_stream_write(ubond_pkt_t* pkt)
         }
     }
 
-    /* now insert in the received queue */
-    ubond_pkt_t* l;
-    // we could search from the other end if it's closer?
-    UBOND_TAILQ_FOREACH(l, &s->received)
-    {
-        if (pkt->p.data_seq == l->p.data_seq) { // replicated packet!
-            log_debug("resend", "Un-necissary resend %lu", pkt->p.data_seq);
-            ubond_pkt_release(pkt);
-            return;
-        }
-        if (aolderb(l->p.data_seq, pkt->p.data_seq))
-            break;
-    }
-    if (l) {
-        UBOND_TAILQ_INSERT_BEFORE(&s->received, l, pkt);
-    } else {
-        UBOND_TAILQ_INSERT_TAIL(&s->received, pkt);
-    }
-
-    /* drain */
-    int drained = 0;
-    while (!UBOND_TAILQ_EMPTY(&s->received) && (UBOND_TAILQ_LAST(&s->received)->p.data_seq == s->next_seq)) {
-
-        ubond_pkt_t* l = UBOND_TAILQ_LAST(&s->received);
-        UBOND_TAILQ_REMOVE(&s->received, l);
-
-        s->seq_to_ack = pkt->p.data_seq;
-        s->next_seq = s->seq_to_ack + 1;
-        drained++;
-
-        if (pkt->p.type == UBOND_PKT_TCP_CLOSE) { // this is an ACK on our request to close, so we can now close
-            ubond_stream_close(s);
-        } else {
-            int ret = write(s->fd, pkt->p.data, pkt->p.len);
-            if (ret != pkt->p.len) {
-                log_warn("sock", "write error: %zd/%d bytes sent (closing stream) ", ret, pkt->p.len);
-                ubond_pkt_t* p = ubond_pkt_get();
-                p->p.len = 0;
-                send_pkt_tun(s, p, UBOND_PKT_TCP_CLOSE);
+    if (pkt->p.type != UBOND_PKT_TCP_ACK) {
+        /* now insert in the received queue */
+        ubond_pkt_t* l;
+        // we could search from the other end if it's closer?
+        UBOND_TAILQ_FOREACH(l, &s->received)
+        {
+            if (pkt->p.data_seq == l->p.data_seq) { // replicated packet!
+                log_debug("tcp", "Un-necissary resend %d", pkt->p.data_seq);
+                ubond_pkt_release(pkt);
+                return;
             }
+            if (aolderb(pkt->p.data_seq, l->p.data_seq))
+                break;
         }
+        log_debug("tcp", "Insert %d", pkt->p.data_seq);
+        if (l) {
+            UBOND_TAILQ_INSERT_BEFORE(&s->received, l, pkt);
+        } else {
+            UBOND_TAILQ_INSERT_TAIL(&s->received, pkt);
+        }
+    } else {
         ubond_pkt_release(pkt);
     }
-    if (drained && !s->sending) {
-        ubond_pkt_t* p = ubond_pkt_get();
-        p->p.len = 0;
-        send_pkt_tun(s, p, UBOND_PKT_TCP_DATA);
+    /* drain */
+    int drained = 0;
+    log_debug("tcp", "next_seq= %d", s->next_seq);
+    while (!UBOND_TAILQ_EMPTY(&s->received) && (UBOND_TAILQ_FIRST(&s->received)->p.data_seq == s->next_seq)) {
+
+        ubond_pkt_t* l = UBOND_TAILQ_FIRST(&s->received);
+        UBOND_TAILQ_REMOVE(&s->received, l);
+
+        s->seq_to_ack = l->p.data_seq;
+        s->next_seq = s->seq_to_ack + 1;
+
+        if (l->p.type == UBOND_PKT_TCP_CLOSE) {
+            ubond_pkt_release(l);
+            ubond_stream_close(s);
+            return;
+        }
+
+        if (l->p.len > 0) {
+            l->sent = 0;
+            UBOND_TAILQ_INSERT_HEAD(&s->draining, l);
+
+            log_debug("tcp", "drain packet %d", l->p.data_seq);
+            if (!ev_is_active(&s->io_write)) {
+                ev_io_start(EV_DEFAULT_ & s->io_write);
+            }
+            drained++;
+        } else {
+            ubond_pkt_release(l); 
+        }
+    }
+    if (drained) {
+        stamp(s);
     }
 }
 
@@ -287,50 +333,87 @@ void tcp_sent(stream_t* s, ubond_pkt_t* pkt)
         ev_io_stop(EV_DEFAULT_ & s->io_read);
     }
 
-    s->sending--;
+    if (s->sending > 0)
+        s->sending--;
+}
+
+//send recieved packets back on the socket
+// could be server or client side
+static void on_write_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
+{
+    stream_t* s = (stream_t*)ev->data;
+
+    /* drain */
+    // while?
+    if (!UBOND_TAILQ_EMPTY(&s->draining)) {
+        ubond_pkt_t* l = UBOND_TAILQ_LAST(&s->draining);
+        ssize_t ret = write(s->fd, &(l->p.data[l->sent]), l->p.len - l->sent);
+        if (ret > 0)
+            l->sent += ret;
+        if (ret < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                log_warn("sock", "write error: %zd/%d bytes sent (closing stream) ", ret, l->p.len);
+                ubond_pkt_t* p = ubond_pkt_get();
+                p->p.len = 0;
+                send_pkt_tun(s, p, UBOND_PKT_TCP_CLOSE);
+                ubond_stream_close(s); // is this safe? it will drain all pkts including this one
+            }
+            return;
+        }
+        if (l->sent >= l->p.len) {
+            log_debug("sock", "drained %d", l->p.data_seq);
+            UBOND_TAILQ_REMOVE(&s->draining, l);
+            ubond_pkt_release(l);
+        }
+    }
+    if (UBOND_TAILQ_EMPTY(&s->draining)) {
+        if (ev_is_active(&s->io_write)) {
+            ev_io_stop(EV_DEFAULT_ & s->io_write);
+        }
+    }
 }
 
 //recieve a packet and set it up to be sent
 // could be server or client side
+ubond_pkt_t *sock_spair=NULL;
 static void on_read_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
 {
-    int rv;
-    char buf[DEFAULT_MTU];
     stream_t* s = (stream_t*)ev->data;
-    ubond_pkt_t* pkt;
-
+    ssize_t rv;
     do {
-        pkt = ubond_pkt_get();
-        //printf("fetching %d %d %d\n", ev->fd, s->fd, ubond_options.mtu);
         if (ubond_pkt_list_is_full(&send_buffer))
             break;
+        if (!sock_spair) sock_spair=ubond_pkt_get();
+        ubond_pkt_t* pkt = sock_spair;
         rv = recv(ev->fd, &pkt->p.data, ubond_options.mtu, MSG_DONTWAIT);
         if (rv < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                //printf("Would block\n");
-                ubond_pkt_release(pkt);
                 break;
             } else {
                 log_warn("sock", "stream closing ");
                 pkt->p.len = 0;
                 send_pkt_tun(s, pkt, UBOND_PKT_TCP_CLOSE);
+                sock_spair=NULL;
                 break;
             }
-        } else {
-            //printf("Send packet\n");
+        }
+        if (rv > 0) {
             pkt->p.len = rv;
             send_pkt_tun(s, pkt, UBOND_PKT_TCP_DATA);
+            sock_spair=NULL;
+            printf("HERE %lu\n", send_buffer.length);
+        } else {
+            break;
         }
-    } while (rv > 0);
+    } while (0);
 
-    if (ubond_pkt_list_is_full(&send_buffer)) {
+    if (ubond_pkt_list_is_full_watermark(&send_buffer)) {
         pause_streams();
     }
 }
 
 static void on_accept_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
 {
-    stream_t* s;
     struct sockaddr cliaddr;
     socklen_t clilen = sizeof(cliaddr);
 
@@ -348,7 +431,9 @@ static void on_accept_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
     stream->fd = fd;
     stream->data_seq = 0;
     ev_io_init(&stream->io_read, on_read_cb, fd, EV_READ);
+    ev_io_init(&stream->io_write, on_write_cb, fd, EV_WRITE);
     stream->io_read.data = (void*)stream;
+    stream->io_write.data = (void*)stream;
     stream->flow_id = stream->preset_flow_id; // we set the flowID
     stream->sending = 0;
     stream->seq_to_ack = 0;
@@ -356,6 +441,7 @@ static void on_accept_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
 
     UBOND_TAILQ_INIT(&stream->sent);
     UBOND_TAILQ_INIT(&stream->received);
+    UBOND_TAILQ_INIT(&stream->draining);
 
     ubond_pkt_t* pkt = ubond_pkt_get();
     if (ubond_pkt_list_is_full(&hpsend_buffer)) {
@@ -373,7 +459,7 @@ static void on_accept_cb(struct ev_loop* loop, struct ev_io* ev, int revents)
 
     pkt->p.len = sizeof(struct sockaddr);
     pkt->p.flow_id = stream->flow_id;
-    pkt->p.data_seq = stream->data_seq++;
+    pkt->p.data_seq = 0;
     pkt->p.type = UBOND_PKT_TCP_OPEN;
     ubond_buffer_write(&hpsend_buffer, pkt);
 }
@@ -419,6 +505,8 @@ void ubond_socks_init(ubond_pkt_t* pkt)
 {
     struct sockaddr* rp = (struct sockaddr*)(pkt->p.data);
 
+    log_debug("tcp", "New socket request");
+
     int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) {
         log_warn("sock", "Unable to open socket ");
@@ -426,7 +514,8 @@ void ubond_socks_init(ubond_pkt_t* pkt)
     }
     int r = connect(fd, rp, sizeof(struct sockaddr));
     if (r < 0) {
-        log_warn("sock", "Unable to connect socket ");
+        log_warn("sock", "Unable to connect socket fd:%d  ip:%s port:%d",
+            fd, inet_ntoa(((struct sockaddr_in*)rp)->sin_addr), ntohs(((struct sockaddr_in*)rp)->sin_port));
         close(fd);
         return;
     }
@@ -436,9 +525,14 @@ void ubond_socks_init(ubond_pkt_t* pkt)
     s->fd = fd;
     s->flow_id = pkt->p.flow_id; // THEY set the flowid
     s->data_seq = 0;
+    s->next_seq = 0;
     ev_io_init(&s->io_read, on_read_cb, fd, EV_READ);
+    ev_io_init(&s->io_write, on_write_cb, fd, EV_WRITE);
     s->io_read.data = (void*)s;
-
+    s->io_write.data = (void*)s;
+    UBOND_TAILQ_INIT(&s->sent);
+    UBOND_TAILQ_INIT(&s->received);
+    UBOND_TAILQ_INIT(&s->draining);
     UBOND_TAILQ_INSERT_TAIL(&active, s);
     if (!paused)
         ev_io_start(EV_DEFAULT_ & s->io_read);

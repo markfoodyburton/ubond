@@ -34,6 +34,7 @@ enum {
     UBOND_PKT_TCP_OPEN,
     UBOND_PKT_TCP_CLOSE,
     UBOND_PKT_TCP_DATA,
+    UBOND_PKT_TCP_ACK,    
 };
 
 
@@ -45,9 +46,10 @@ typedef struct {
     uint16_t timestamp;
     uint16_t timestamp_reply;
     uint16_t tun_seq;  /* Stream sequence used for loss and reordering */
+    //may not need flowid of ack
     uint16_t flow_id;  /* surely 65k streams is more than we can cope with anyway? */
-    uint16_t data_seq;
-    uint16_t ack_seq;
+    uint32_t data_seq;
+    uint32_t ack_seq;
     char data[DEFAULT_MTU];
 } __attribute__((packed)) ubond_proto_t;
 
@@ -58,8 +60,8 @@ inline void betoh_proto(ubond_proto_t *proto)
     proto->timestamp_reply = be16toh(proto->timestamp_reply);
     proto->tun_seq = be16toh(proto->tun_seq);
     proto->flow_id = be16toh(proto->flow_id);
-    proto->data_seq = be16toh(proto->data_seq);
-    proto->ack_seq = be16toh(proto->ack_seq);
+    proto->data_seq = be32toh(proto->data_seq);
+    proto->ack_seq = be32toh(proto->ack_seq);
 }
 inline void htobe_proto(ubond_proto_t *proto)
 {
@@ -68,17 +70,18 @@ inline void htobe_proto(ubond_proto_t *proto)
     proto->timestamp_reply = htobe16(proto->timestamp_reply);
     proto->tun_seq = htobe16(proto->tun_seq);
     proto->flow_id = htobe16(proto->flow_id);
-    proto->data_seq = htobe16(proto->data_seq);
-    proto->ack_seq = htobe16(proto->ack_seq);
+    proto->data_seq = htobe32(proto->data_seq);
+    proto->ack_seq = htobe32(proto->ack_seq);
 }
 
 typedef struct ubond_pkt_t
 {
   struct stream_t *stream;  // for sent packets, point to stream if held by TCP stream.
-  struct ubond_tunnel_s *sent_tun; // point to tun if it's held in old_pkts list
+  //struct ubond_tunnel_s *sent_tun; // point to tun if it's held in old_pkts list
 
   ubond_proto_t p;
-  uint16_t len; // wire read length
+  uint16_t len;         // wire read length
+  uint16_t sent;   // remaining to be sent
   int usecnt;
 
   TAILQ_ENTRY(ubond_pkt_t) entry;

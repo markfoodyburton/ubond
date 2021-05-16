@@ -92,7 +92,7 @@ void ubond_reorder_insert(ubond_tunnel_t *tun, ubond_pkt_t *pkt);
  * Get the next data sequence to stamp onto data packets
  *
  */
-uint16_t next_data_seq();
+uint32_t next_data_seq();
 
 
 #endif /* UBOND_REORDER_H */

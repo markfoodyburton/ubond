@@ -91,7 +91,7 @@ ubond_pkt_t* ubond_pkt_get()
     }
 
     p->stream = NULL;
-    p->sent_tun = NULL;
+    //p->sent_tun = NULL;
 
     if (p->usecnt != 0) {
         fatalx("USECNT !=0 (get)");
@@ -102,12 +102,9 @@ ubond_pkt_t* ubond_pkt_get()
 };
 void ubond_pkt_release(ubond_pkt_t* p)
 {
-    if (p->stream) {
-        log_warnx("PKT", "Packet has stream on release?");
-    }
-    if (p->sent_tun) {
-        log_warnx("PKT", "Packet has sent_tun on release?");
-    }
+    //    if (p->sent_tun) {
+    //        log_warnx("PKT", "Packet has sent_tun on release?");
+    //    }
     pool_out--;
 
     p->usecnt--;
@@ -126,6 +123,10 @@ void ubond_pkt_insert(ubond_pkt_list_t* list, ubond_pkt_t* pkt)
 int ubond_pkt_list_is_full(ubond_pkt_list_t* list)
 {
     return (list->length >= list->max_size);
+}
+int ubond_pkt_list_is_full_watermark(ubond_pkt_list_t* list)
+{
+    return (list->length >= (list->max_size) / 2);
 }
 void ubond_pkt_list_init(ubond_pkt_list_t* list, uint64_t size)
 {
@@ -208,31 +209,32 @@ static struct option long_options[] = {
     { 0, 0, 0, 0 }
 };
 
-static int ubond_rtun_start(ubond_tunnel_t* t);
+static void ubond_rtun_start(ubond_tunnel_t* t);
 static void ubond_rtun_read(EV_P_ ev_io* w, int revents);
 static void ubond_rtun_write(EV_P_ ev_io* w, int revents);
+static void ubond_rtun_accept(EV_P_ ev_io* w, int revents);
+static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents);
+static void ubond_rtun_tcp_write(EV_P_ ev_io* w, int revents);
 static void ubond_rtun_write_timeout(EV_P_ ev_timer* w, int revents);
 static void ubond_rtun_check_timeout(EV_P_ ev_timer* w, int revents);
 static void ubond_rtun_write_check(EV_P_ ev_check* w, int revents);
 static void ubond_rtun_send_keepalive(ev_tstamp now, ubond_tunnel_t* t);
 static void ubond_rtun_send_disconnect(ubond_tunnel_t* t);
 static int ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt);
-static void ubond_rtun_resend(struct resend_data* d);
-static void ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint16_t tun_seqn, uint16_t len);
+//static void ubond_rtun_resend(struct resend_data* d);
+//static void ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint16_t tun_seqn, uint16_t len);
 static void ubond_rtun_send_auth_ok(ubond_tunnel_t* t);
 static void ubond_rtun_tuntap_up();
 static void ubond_rtun_status_up(ubond_tunnel_t* t);
 static void ubond_rtun_tick_connect(ubond_tunnel_t* t);
 static void ubond_rtun_recalc_weight();
 static void ubond_update_status();
-static int ubond_rtun_bind(ubond_tunnel_t* t);
+static int ubond_rtun_bind(ubond_tunnel_t* t, int fd, int socktype);
 static void update_process_title();
 static void ubond_tuntap_init();
 static void ubond_rtun_choose(ubond_tunnel_t* rtun);
 static void ubond_rtun_check_lossy(ubond_tunnel_t* tun);
-static int
-ubond_protocol_read(ubond_tunnel_t* tun,
-    ubond_pkt_t* pkt);
+static void ubond_update_srtt(ubond_tunnel_t* tun, ubond_pkt_t* pkt);
 
 static void
 usage(char** argv)
@@ -255,6 +257,23 @@ usage(char** argv)
         "For more details see ubond(1) and ubond.conf(5).\n",
         argv[0]);
     exit(2);
+}
+
+int is_tcp(ubond_pkt_t* pkt)
+{
+    // should packet inspect, and only re-order TCP packets !
+    // 17 - UDP
+    // 6 - TCP
+
+    if (pkt->p.type == UBOND_PKT_TCP_OPEN
+        || pkt->p.type == UBOND_PKT_TCP_CLOSE
+        || pkt->p.type == UBOND_PKT_TCP_DATA
+        || pkt->p.type == UBOND_PKT_TCP_ACK
+        || ((pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND) && pkt->p.data[9] == 6)) {
+        return 1;
+    } else {
+        return 0;
+    }
 }
 
 void preset_permitted(int argc, char** argv)
@@ -281,10 +300,13 @@ void preset_permitted(int argc, char** argv)
                 switch (mag) {
                 default:
                     usage(argv);
+                    break;
                 case 'm':
-                    val *= 1000;
+                    val *= 1000 * 1000;
+                    break;
                 case 'k':
                     val *= 1000;
+                    break;
                 case 'b':
                     break;
                 }
@@ -339,7 +361,11 @@ inline static void ubond_rtun_tick(ubond_tunnel_t* tun)
 /* Inject the packet to the tuntap device (real network) */
 void ubond_rtun_inject_tuntap(ubond_pkt_t* pkt)
 {
-    ubond_tuntap_write(&tuntap, pkt);
+    if (pkt && pkt->p.len) {
+        ubond_tuntap_write(&tuntap, pkt);
+    } else {
+        log_info("protocol", "Zero length packet?\n");
+    }
 
     //UBOND_TAILQ_INSERT_HEAD(&tuntap.sbuf, pkt);
     ///* Send the packet back into the LAN */
@@ -359,12 +385,22 @@ inline int count_1s(uint64_t b)
 
 /* Count the loss on the last 64 packets */
 static void
-ubond_loss_update(ubond_tunnel_t* tun, uint16_t seq)
+ubond_loss_update(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
-    int16_t d=(int16_t)(seq - tun->seq_last);
+    uint16_t seq = pkt->p.tun_seq;
+    int16_t d = (int16_t)(seq - tun->seq_last);
 
-    if (abs(d)>=60) {
+    if (seq==0) return;
+
+    tun->sent_loss = pkt->p.sent_loss;
+    if (tun->sent_loss >= (LOSS_TOLERENCE / 4.0)) {
+        ubond_rtun_recalc_weight();
+    }
+
+    if (abs(d) >= 60) {
         /* consider a connection reset. */
+        log_warnx("loss", "Tun sequence reset?????");
+        ubond_reorder_reset();
         tun->seq_vect = (uint64_t)-1;
         tun->seq_last = seq;
         tun->loss = 0;
@@ -373,12 +409,12 @@ ubond_loss_update(ubond_tunnel_t* tun, uint16_t seq)
     if (d > 0) {
         tun->seq_vect <<= d;
         tun->seq_vect |= 1ull;
-        if ((tun->seq_vect & (1ull<<3))==0) // if this isn't set, we suspect a loss.
-        {
-            if (d>=3) {
-            ubond_rtun_request_resend(tun, seq - d, d-1);
-            }
-        }
+        //        if ((tun->seq_vect & (1ull<<3))==0) // if this isn't set, we suspect a loss.
+        //        {
+        //            if (d>=3) {
+        //            ubond_rtun_request_resend(tun, seq - d, d-1);
+        //            }
+        //        }
     } else {
         tun->seq_vect |= 1ull << (-d);
     }
@@ -389,197 +425,279 @@ ubond_loss_update(ubond_tunnel_t* tun, uint16_t seq)
 }
 
 /* read from the rtunnel => write directly to the tap send buffer */
+//static void
+//ubond_rtun_read(EV_P_ ev_io* w, int revents)
+//{
+//    ubond_tunnel_t* tun = w->data;
+
 static void
-ubond_rtun_read(EV_P_ ev_io* w, int revents)
+ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
-    ubond_tunnel_t* tun = w->data;
-    ssize_t len;
-    struct sockaddr_storage clientaddr;
-    socklen_t addrlen = sizeof(clientaddr);
-//    do {
-        ubond_pkt_t* pkt = ubond_pkt_get();
-        len = recvfrom(tun->fd, &(pkt->p),
-            sizeof(pkt->p),
-            MSG_DONTWAIT, (struct sockaddr*)&clientaddr, &addrlen);
-        if (len < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                log_warn("net", "%s read error", tun->name);
-                ubond_rtun_status_down(tun);
-            }
-            ubond_pkt_release(pkt);
-            return;
-        }
-        if (len == 0) {
-            log_info("protocol", "%s peer closed the connection", tun->name);
-            ubond_rtun_status_down(tun);
-            ubond_pkt_release(pkt);
-            return;
-        }
-        betoh_proto(&(pkt->p));
+    ssize_t len = pkt->len;
 
-        pkt->len = len; // stamp the wire length
+    if (!len) {
+        ubond_pkt_release(pkt);
+        return;
+    }
 
-        /* validate the received packet */
-        if (ubond_protocol_read(tun, pkt) < 0) {
-            log_info("protocol", "Protocol error");
-            ubond_pkt_release(pkt);
-            return;
-            //            return;
-        }
-
-        tun->recvbytes += len;
-        tun->recvpackets += 1;
-        tun->bm_data += pkt->p.len;
-        if (tun->quota) {
-            if (tun->permitted > (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD)) {
-                tun->permitted -= (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD);
-            } else {
-                tun->permitted = 0;
-            }
-        }
-
-        if (!tun->addrinfo)
-            fatalx("tun->addrinfo is NULL!");
-
-        if ((tun->addrinfo->ai_addrlen != addrlen) || (memcmp(tun->addrinfo->ai_addr, &clientaddr, addrlen) != 0)) {
-            if (tun->status >= UBOND_AUTHOK) {
-                log_warnx("protocol", "%s rejected non authenticated connection",
-                    tun->name);
-                ubond_rtun_status_down(tun);
-                ubond_pkt_release(pkt);
-                return;
-            }
-            char clienthost[NI_MAXHOST];
-            char clientport[NI_MAXSERV];
-            int ret;
-            if ((ret = getnameinfo((struct sockaddr*)&clientaddr, addrlen,
-                     clienthost, sizeof(clienthost),
-                     clientport, sizeof(clientport),
-                     NI_NUMERICHOST | NI_NUMERICSERV))
-                < 0) {
-                log_warn("protocol", "%s error in getnameinfo: %d",
-                    tun->name, ret);
-            } else {
-                log_info("protocol", "%s new connection -> %s:%s",
-                    tun->name, clienthost, clientport);
-                memcpy(tun->addrinfo->ai_addr, &clientaddr, addrlen);
-            }
-        }
-        log_debug("net", "< %s recv %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x)",
-            tun->name, (int)len, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq);
-
-        if (tun->status >= UBOND_AUTHOK) {
-            switch (pkt->p.type) {
-            case UBOND_PKT_DATA_RESEND:
-                log_debug("resend","recieved resent packet");
-            case UBOND_PKT_DATA:
-                ubond_rtun_tick(tun);
-                ubond_reorder_insert(tun, pkt);
-                break;
-            case UBOND_PKT_KEEPALIVE:
-                log_debug("protocolx", "%s keepalive received", tun->name);
-                ubond_rtun_tick(tun);
-                uint64_t bw = 0;
-                sscanf(pkt->p.data, "%lu", &bw);
-                if (bw > 0) {
-                    tun->bandwidth_out = bw;
-                }
-                ubond_pkt_release(pkt);
-                break;
-            case UBOND_PKT_DISCONNECT:
-                log_info("protocol", "%s disconnect received", tun->name);
-                ubond_rtun_status_down(tun);
-                ubond_pkt_release(pkt);
-                break;
-            case UBOND_PKT_RESEND:
-                ubond_rtun_tick(tun);
-                ubond_rtun_resend((struct resend_data*)pkt->p.data);
-                ubond_pkt_release(pkt);
-                break;
-            case UBOND_PKT_TCP_OPEN:
-                ubond_rtun_tick(tun);
-                ubond_socks_init(pkt);
-                ubond_pkt_release(pkt);
-                break;
-            case UBOND_PKT_TCP_CLOSE:
-            case UBOND_PKT_TCP_DATA:
-                ubond_rtun_tick(tun);
-                ubond_stream_write(pkt);
-                break;
-            case UBOND_PKT_AUTH:
-                // we are already authenticated
-                //                ubond_rtun_send_auth(tun);
-            case UBOND_PKT_AUTH_OK:
-                break;
-            default:
-                log_warnx("protocol", "Unknown packet type %d", pkt->p.type);
-                ubond_pkt_release(pkt);
-            }
-
-        } else {
-            if (pkt->p.type == UBOND_PKT_AUTH || pkt->p.type == UBOND_PKT_AUTH_OK) {
-                ubond_rtun_tick(tun);
-
-                ubond_pkt_challenge* challenge = (ubond_pkt_challenge*)(pkt->p.data);
-                challenge->version = be16toh(challenge->version);
-                challenge->permitted = be64toh(challenge->permitted);
-
-                if (challenge->version != UBOND_PROTOCOL_VERSION) {
-                    fatalx("Protocol version must match");
-                }
-                if (strcmp(challenge->password, ubond_options.password) != 0) {
-                    log_warnx("password", "Invalid password");
-                } else {
-                    log_debug("protocol", "%s authenticated", tun->name);
-                    ubond_rtun_status_up(tun);
-
-                    int64_t perm = challenge->permitted;
-                    if (perm > tun->permitted)
-                        tun->permitted = perm;
-
-                    if (tun->server_mode) {
-                        ubond_rtun_send_auth_ok(tun); // send OK to client
-                    }
-                }
-            } else {
-                log_debug("protocol", "%s ignoring non authenticated packet", tun->name);
-            }
-            ubond_pkt_release(pkt);
-        }
-//    } while (1);
-}
-
-static int
-ubond_protocol_read(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
-{
-    ubond_proto_t* proto = &pkt->p;
-    int ret;
-    uint64_t now64 = ubond_timestamp64(ev_now(EV_DEFAULT_UC));
-
-    tun->pkts_cnt++;
-
-    /* Overkill */
     /* pkt->data contains ubond_proto_t struct */
     if (pkt->len > sizeof(*pkt) || pkt->len < (PKTHDRSIZ(pkt->p))) {
         log_warnx("protocol", "%s received invalid packet of %d bytes",
             tun->name, pkt->len);
-        goto fail;
+        ubond_pkt_release(pkt);
+        return;
     }
 
-    if (/*rlen == 0 ||*/ proto->len > sizeof(proto->data)) {
-        log_warnx("protocol", "%s invalid packet size: %d", tun->name, proto->len);
-        goto fail;
+    if (pkt->p.len > sizeof(pkt->p.data)) {
+        log_warnx("protocol", "%s invalid packet size: %d", tun->name, pkt->p.len);
+        ubond_pkt_release(pkt);
+        return;
     }
 
-    ubond_loss_update(tun, proto->tun_seq);
-    // use the TUN seq number to
-    // calculate loss
+    //    if (!is_tcp(pkt)) {
+    /* validate the received packet */
+    ubond_loss_update(tun, pkt);
+    ubond_update_srtt(tun, pkt);
+    //    }
+    tun->pkts_cnt++;
 
-    tun->sent_loss = proto->sent_loss;
-    if (tun->sent_loss >= (LOSS_TOLERENCE / 4.0)) {
-        ubond_rtun_recalc_weight();
+    tun->recvbytes += len;
+    tun->recvpackets += 1;
+    tun->bm_data += pkt->p.len;
+    if (tun->quota) {
+        if (tun->permitted > (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD)) {
+            tun->permitted -= (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD);
+        } else {
+            tun->permitted = 0;
+        }
     }
 
+    log_debug("net", "< %s recv %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x, srtt=%f)",
+        tun->name, (int)len, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq, tun->srtt);
+    ubond_rtun_tick(tun);
+
+    if (tun->status >= UBOND_AUTHOK) {
+        switch (pkt->p.type) {
+        case UBOND_PKT_DATA_RESEND:
+        case UBOND_PKT_DATA:
+            if (pkt->p.type == UBOND_PKT_DATA_RESEND)
+                log_debug("resend", "recieved resent packet");
+            ubond_reorder_insert(tun, pkt);
+            break;
+        case UBOND_PKT_KEEPALIVE:
+            log_debug("protocolx", "%s keepalive received", tun->name);
+            uint64_t bw = 0;
+            sscanf(pkt->p.data, "%lu", &bw);
+            if (bw > 0) {
+                tun->bandwidth_out = bw;
+            }
+            ubond_pkt_release(pkt);
+            break;
+        case UBOND_PKT_DISCONNECT:
+            log_info("protocol", "%s disconnect received", tun->name);
+            ubond_rtun_status_down(tun);
+            ubond_pkt_release(pkt);
+            break;
+        case UBOND_PKT_RESEND:
+            //                ubond_rtun_resend((struct resend_data*)pkt->p.data);
+            ubond_pkt_release(pkt);
+            break;
+        case UBOND_PKT_TCP_OPEN:
+            ubond_socks_init(pkt);
+            ubond_pkt_release(pkt);
+            break;
+        case UBOND_PKT_TCP_CLOSE:
+        case UBOND_PKT_TCP_DATA:
+        case UBOND_PKT_TCP_ACK:
+            ubond_stream_write(pkt);
+            break;
+
+        case UBOND_PKT_AUTH_OK:
+        case UBOND_PKT_AUTH:
+            if (pkt->p.type == UBOND_PKT_AUTH_OK) {
+                if (tun->server_mode) {
+                    ubond_rtun_status_up(tun);
+                }
+            }
+            ubond_pkt_release(pkt);
+            ubond_reorder_reset(); // potential reset on other side
+            if (tun->server_mode) {
+                ubond_rtun_send_auth_ok(tun); // send OK to client
+            }
+            break;
+        default:
+            log_warnx("protocol", "Unknown packet type %d", pkt->p.type);
+            ubond_pkt_release(pkt);
+        }
+
+    } else {
+        if (pkt->p.type == UBOND_PKT_AUTH || pkt->p.type == UBOND_PKT_AUTH_OK) {
+
+            ubond_pkt_challenge* challenge = (ubond_pkt_challenge*)(pkt->p.data);
+            challenge->version = be16toh(challenge->version);
+            challenge->permitted = be64toh(challenge->permitted);
+
+            if (challenge->version != UBOND_PROTOCOL_VERSION) {
+                fatalx("Protocol version must match");
+            }
+            if (strcmp(challenge->password, ubond_options.password) != 0) {
+                log_warnx("password", "Invalid password");
+            } else {
+                log_debug("protocol", "%s authenticated", tun->name);
+                ubond_rtun_status_up(tun);
+                ubond_reorder_reset();
+
+                int64_t perm = challenge->permitted;
+                if (perm > tun->permitted)
+                    tun->permitted = perm;
+
+                if (tun->server_mode) {
+                    ubond_rtun_send_auth_ok(tun); // send OK to client
+                }
+            }
+        } else {
+            log_debug("protocol", "%s ignoring non authenticated packet", tun->name);
+        }
+        ubond_pkt_release(pkt);
+    }
+    //    } while (1);
+}
+
+/* TCP read */
+static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents)
+{
+    ubond_tunnel_t* tun = w->data;
+    struct sockaddr_storage clientaddr;
+    socklen_t addrlen = sizeof(clientaddr);
+    do {
+        //    printf("READ tcp %s\n", tun->name);
+        if (tun->tcp_fill == NULL) {
+            tun->tcp_fill = ubond_pkt_get();
+            tun->tcp_fill->len = 0;
+        }
+        ubond_pkt_t* pkt = tun->tcp_fill;
+        char* tcp_data = (char*)&(pkt->p);
+
+        if (pkt->len < PKTHDRSIZ(pkt->p)) {
+            ssize_t len = recvfrom(tun->fd_tcp, &(tcp_data[pkt->len]),
+                PKTHDRSIZ(pkt->p) - pkt->len,
+                MSG_DONTWAIT, (struct sockaddr*)&clientaddr, &addrlen);
+            if (len < 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    log_warn("net", "%s read error", tun->name);
+                    ubond_rtun_status_down(tun);
+                    ubond_pkt_release(pkt);
+                    tun->tcp_fill = NULL;
+                }
+                return;
+            }
+            if (len > 0) {
+                pkt->len += len;
+            }
+            if (pkt->len >= PKTHDRSIZ(pkt->p)) {
+                betoh_proto(&(pkt->p));
+            }
+        }
+        if (pkt->len >= PKTHDRSIZ(pkt->p)) {
+            ssize_t to_read = PKTHDRSIZ(pkt->p) + pkt->p.len - pkt->len;
+            ssize_t len = (to_read) ? recvfrom(tun->fd_tcp, &(tcp_data[pkt->len]),
+                                          to_read,
+                                          MSG_DONTWAIT, (struct sockaddr*)&clientaddr, &addrlen)
+                                    : 0;
+            if (len < 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    log_warn("net", "%s read error", tun->name);
+                    ubond_rtun_status_down(tun);
+                    ubond_pkt_release(pkt);
+                    tun->tcp_fill = NULL;
+                }
+                return;
+            }
+            if (len > 0) {
+                pkt->len += len;
+            }
+        }
+        if (pkt->len >= PKTHDRSIZ(pkt->p) && pkt->len > PKTHDRSIZ(pkt->p) + pkt->p.len) {
+            fatalx("Packet length too large?");
+        }
+        if (pkt->len >= PKTHDRSIZ(pkt->p) && pkt->len == PKTHDRSIZ(pkt->p) + pkt->p.len) {
+            ubond_rtun_read_pkt(tun, pkt);
+            tun->tcp_fill = NULL;
+        } else {
+            break;
+        }
+    } while (0);
+}
+
+/* UDP read */
+static void
+ubond_rtun_read(EV_P_ ev_io* w, int revents)
+{
+    ubond_tunnel_t* tun = w->data;
+    struct sockaddr_storage clientaddr;
+    socklen_t addrlen = sizeof(clientaddr);
+    ssize_t len;
+    ubond_pkt_t* pkt = ubond_pkt_get();
+
+    len = recvfrom(tun->fd, &(pkt->p),
+        sizeof(pkt->p),
+        MSG_DONTWAIT, (struct sockaddr*)&clientaddr, &addrlen);
+    if (len < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            log_warn("net", "%s read error", tun->name);
+            ubond_rtun_status_down(tun);
+        }
+        ubond_pkt_release(pkt);
+        return;
+    }
+    if (len == 0) {
+        log_info("protocol", "%s peer closed the connection", tun->name);
+        printf("Closing %d (udl)\n", tun->fd);
+        ubond_rtun_status_down(tun);
+        ubond_pkt_release(pkt);
+        return;
+    }
+    betoh_proto(&(pkt->p));
+
+    pkt->len = len; // stamp the wire length
+
+    if (!tun->addrinfo)
+        fatalx("tun->addrinfo is NULL!");
+
+    if ((tun->addrinfo->ai_addrlen != addrlen) || (memcmp(tun->addrinfo->ai_addr, &clientaddr, addrlen) != 0)) {
+        if (tun->status >= UBOND_AUTHOK) {
+            log_warnx("protocol", "%s rejected non authenticated connection",
+                tun->name);
+            ubond_rtun_status_down(tun);
+            ubond_pkt_release(pkt);
+            return;
+        }
+        char clienthost[NI_MAXHOST];
+        char clientport[NI_MAXSERV];
+        int ret;
+        if ((ret = getnameinfo((struct sockaddr*)&clientaddr, addrlen,
+                 clienthost, sizeof(clienthost),
+                 clientport, sizeof(clientport),
+                 NI_NUMERICHOST | NI_NUMERICSERV))
+            < 0) {
+            log_warn("protocol", "%s error in getnameinfo: %d",
+                tun->name, ret);
+        } else {
+            log_info("protocol", "%s new connection -> %s:%s",
+                tun->name, clienthost, clientport);
+            memcpy(tun->addrinfo->ai_addr, &clientaddr, addrlen);
+        }
+    }
+
+    ubond_rtun_read_pkt(tun, pkt);
+}
+
+static void
+ubond_update_srtt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
+{
+    if (is_tcp(pkt)) return;
+    ubond_proto_t* proto = &pkt->p;
+    uint64_t now64 = ubond_timestamp64(ev_now(EV_DEFAULT_UC));
     if (proto->timestamp != (uint16_t)-1) {
         tun->saved_timestamp = proto->timestamp;
         tun->saved_timestamp_received_at = now64;
@@ -595,21 +713,6 @@ ubond_protocol_read(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         //        log_debug("rtt", "%ums srtt %ums loss ratio: %d",
         //            (unsigned int)R, (unsigned int)R, ubond_loss_ratio(tun));
     }
-    return 0;
-fail:
-    return -1;
-}
-
-int is_tcp(ubond_pkt_t* pkt)
-{
-    // should packet inspect, and only re-order TCP packets !
-    // 17 - UDP
-    // 6 - TCP
-    if ((pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND) && pkt->p.data[9] == 6) {
-        return 1;
-    } else {
-        return 0;
-    }
 }
 
 static int
@@ -618,25 +721,30 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     ssize_t ret;
     size_t wlen;
     ubond_proto_t* proto = &(pkt->p);
+    int tcp = is_tcp(pkt);
+    int fd = (tcp) ? tun->fd_tcp : tun->fd;
 
     wlen = PKTHDRSIZ(pkt->p) + pkt->p.len;
 
     // old_pkts is a ring buffer of the last N packets.
     // The packets may be still held by the stream.
-    if (tun->old_pkts[tun->seq % RESENDBUFSIZE]) {
-        tun->old_pkts[tun->seq % RESENDBUFSIZE]->sent_tun = NULL; // remove from this tun
-        if (!tun->old_pkts[tun->seq % RESENDBUFSIZE]->stream) {
-            ubond_pkt_release(tun->old_pkts[tun->seq % RESENDBUFSIZE]);
-        }
-    }
-    tun->old_pkts[tun->seq % RESENDBUFSIZE] = pkt;
-    pkt->sent_tun = tun;
+    //    if (tun->old_pkts[tun->seq % RESENDBUFSIZE]) {
+    //        tun->old_pkts[tun->seq % RESENDBUFSIZE]->sent_tun = NULL; // remove from this tun
+    //        if (!tun->old_pkts[tun->seq % RESENDBUFSIZE]->stream) {
+    //            ubond_pkt_release(tun->old_pkts[tun->seq % RESENDBUFSIZE]);
+    //        }
+    //    }
+    //    tun->old_pkts[tun->seq % RESENDBUFSIZE] = pkt;
+    //pkt->sent_tun = tun;
 
     // we should still use this to measure packet loss even if they are UDP packets
     // tun seq incrememts even if we resend
-    proto->tun_seq = tun->seq;
-
-    tun->seq++; // ALL packets are stored in the resend old_pkts buffer, even if
+    if (!tcp) {
+        proto->tun_seq = tun->seq;
+        tun->seq++; // ALL packets are stored in the resend old_pkts buffer, even if
+    } else {
+        proto->tun_seq = 0;
+    }
     // they fail to send.
 
     //proto->flow_id = tun->flow_id; this is now handled by socks
@@ -668,49 +776,71 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 
     proto->timestamp = ubond_timestamp16(now64);
 
+    pkt->sent = 0;
     htobe_proto(proto);
-    ret = sendto(tun->fd, proto, wlen, MSG_DONTWAIT,
+    ret = sendto(fd, proto, wlen, MSG_DONTWAIT,
         tun->addrinfo->ai_addr, tun->addrinfo->ai_addrlen);
     betoh_proto(proto);
 
     if (ret < 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             if (pkt->p.type != UBOND_PKT_AUTH) {
-                log_warnx("net", "%s write error", tun->name);
+                log_warn("net", "%s write error", tun->name);
                 ubond_rtun_status_down(tun);
             } // dont report AUTH packet loss, as we know that !
+            ubond_pkt_release(pkt);
+            return 0;
         } else {
             // we should never attempt a send on a blockable tunnel, so we should
             // nevr get here...
             log_warnx("net", "%s lost write!", tun->name);
-            ubond_rtun_status_down(tun);
+            //            ubond_rtun_status_down(tun);
+            ret = 0; // like we haven't managed to send anything yet.
         }
-    } else {
-        // we are here when we succeed to send the packet
+    }
+
+    {
+        pkt->sent += ret;
+        tun->sending = pkt;
+        tun->busy_writing++; // semaphore that we're busy
 
         tun->sentpackets++;
-        tun->sentbytes += ret;
+        tun->sentbytes += wlen; // To make accounting simpler, we'll pretend we have sent everything
         if (tun->quota) {
-            if (tun->permitted > (ret + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD)) {
-                tun->permitted -= (ret + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD);
+            if (tun->permitted > (wlen + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD)) {
+                tun->permitted -= (wlen + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD);
             } else {
                 tun->permitted = 0;
             }
         }
+        tun->bytes_since_adjust += wlen + IP4_UDP_OVERHEAD;
 
-        // inform the stream
-        if (pkt->stream)
-            tcp_sent(pkt->stream, pkt);
-
-        if (wlen != ret) {
-            log_warnx("net", "%s write error %d/%u",
-                tun->name, (int)ret, (unsigned int)wlen);
+        if (tcp) {
+            if (!ev_is_active(&tun->io_tcp_write)) {
+                ev_io_start(EV_A_ & tun->io_tcp_write);
+            }
         } else {
-            log_debug("net", "> %s sent %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x)",
-                tun->name, (int)ret, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq);
+            if (!ev_is_active(&tun->io_write)) {
+                ev_io_start(EV_A_ & tun->io_write);
+            }
         }
-    }
 
+        // stream will handle memory
+        //        if (pkt->stream) {
+        //            tcp_sent(pkt->stream, pkt);
+        //            log_info("tcp", "> %s sent %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x fd:%d)",
+        //                tun->name, (int)ret, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq, fd);
+        //        } else
+        //            ubond_pkt_release(pkt);
+
+        //        if (wlen != ret) {
+        //            log_warnx("net", "%s write error %d/%u",
+        //                tun->name, (int)ret, (unsigned int)wlen);
+        //        } else {
+        log_debug("net", "> %s sent %ld/%ld bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x fd:%d)",
+            tun->name, ret, wlen, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq, fd);
+        //        }
+    }
     return ret;
 }
 
@@ -720,7 +850,6 @@ ubond_rtun_do_send(ubond_tunnel_t* tun, int timed)
     ev_tstamp now = ev_now(EV_DEFAULT_UC);
     ev_tstamp diff = now - tun->last_adjust;
 
-    int len = 0;
     // if there is hp stuff for us - SEND IT !
     double b = tun->bytes_per_sec * diff;
 
@@ -736,27 +865,38 @@ ubond_rtun_do_send(ubond_tunnel_t* tun, int timed)
 #endif
         if (!UBOND_TAILQ_EMPTY(&tun->hpsbuf)) {
             ubond_pkt_t* pkt = UBOND_TAILQ_POP_LAST(&tun->hpsbuf);
-            len = ubond_rtun_send(tun, pkt);
+            ubond_rtun_send(tun, pkt);
         } else {
             ubond_rtun_choose(tun); //EV_P_ ev_timer *w, int revents);
             if (!UBOND_TAILQ_EMPTY(&tun->sbuf)) {
                 ubond_pkt_t* pkt = UBOND_TAILQ_POP_LAST(&tun->sbuf);
-                len = ubond_rtun_send(tun, pkt);
+                ubond_rtun_send(tun, pkt);
             } else { // nothing sent, so disable the write events
                 if (ev_is_active(&tun->io_write)) {
                     ev_io_stop(EV_A_ & tun->io_write);
                 }
+                if (ev_is_active(&tun->io_tcp_write)) {
+                    ev_io_stop(EV_A_ & tun->io_tcp_write);
+                }
             }
         }
+#if 0
         if (len > 0) {
             // len + the UDP  overhead ??
             tun->bytes_since_adjust += len + IP4_UDP_OVERHEAD;
             tun->busy_writing++; // semaphore that we're busy
-            if (!ev_is_active(&tun->io_write)) {
-                ev_io_start(EV_A_ & tun->io_write);
+            if (tcp) {
+                if (!ev_is_active(&tun->io_tcp_write)) {
+                    ev_io_start(EV_A_ & tun->io_tcp_write);
+                }
+            } else {
+                if (!ev_is_active(&tun->io_write)) {
+                    ev_io_start(EV_A_ & tun->io_write);
+                }
             }
             tun->send_timer.repeat = (double)(len + IP4_UDP_OVERHEAD) / tun->bytes_per_sec;
         }
+#endif
     } else {
 // we're too soon, use a checker to wait for the right time
 //double tte=(tun->bytes_since_adjust - b)/(tun->bandwidth_max * 128);
@@ -773,10 +913,59 @@ static void
 ubond_rtun_write(EV_P_ ev_io* w, int revents)
 {
     ubond_tunnel_t* tun = w->data;
+    ubond_pkt_t* pkt = tun->sending;
     if (tun->busy_writing) {
         tun->busy_writing--;
     }
+    if (pkt) {
+        if (pkt->sent < pkt->len) {
+            log_warnx("protocol", "Incomplete UDP packet recieved!");
+        }
+        ubond_pkt_release(pkt);
+        tun->send_timer.repeat = (double)(pkt->len + IP4_UDP_OVERHEAD) / tun->bytes_per_sec;
+        tun->sending = NULL;
+    }
+    ev_io_stop(EV_A_ & tun->io_write);
     ubond_rtun_do_send(tun, 0);
+}
+static void ubond_rtun_tcp_write(EV_P_ ev_io* w, int revents)
+{
+    ubond_tunnel_t* tun = w->data;
+    ubond_pkt_t* pkt = tun->sending;
+    ssize_t ret = 0;
+    if (pkt && pkt->sent < pkt->len) {
+        htobe_proto(&pkt->p);
+        char* tcp_data = (char*)&(pkt->p);
+        ret = sendto(tun->fd_tcp, &(tcp_data[pkt->sent]), pkt->len - pkt->sent, MSG_DONTWAIT,
+            tun->addrinfo->ai_addr, tun->addrinfo->ai_addrlen);
+        betoh_proto(&pkt->p);
+        if (ret > 0) {
+            pkt->sent += ret;
+        }
+        if (ret < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                log_warn("net", "%s write error", tun->name);
+                ubond_rtun_status_down(tun);
+            }
+        }
+    }
+    if (!pkt || pkt->sent >= pkt->len) {
+        if (tun->busy_writing) {
+            tun->busy_writing--;
+        }
+        tun->sending = NULL;
+        if (pkt) {
+            if (pkt->stream)
+                tcp_sent(pkt->stream, pkt);
+            else
+                ubond_pkt_release(pkt);
+            //            log_debug("tcp", "> %s sent all %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x fd:%d)",
+            //                tun->name, pkt->len, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq, tun->fd_tcp);
+            tun->send_timer.repeat = (double)(pkt->len + IP4_UDP_OVERHEAD) / tun->bytes_per_sec;
+        }
+        ev_io_stop(EV_A_ & tun->io_tcp_write);
+        ubond_rtun_do_send(tun, 0);
+    }
 }
 
 static void
@@ -826,6 +1015,8 @@ ubond_rtun_new(const char* name,
     /* other values are enforced by calloc to 0/NULL */
     new->name = strdup(name);
     new->fd = -1;
+    new->fd_tcp = -1;
+    new->fd_tcp_conn = -1;
     new->server_mode = server_mode;
     new->weight = 1;
     new->status = UBOND_DISCONNECTED;
@@ -878,8 +1069,14 @@ ubond_rtun_new(const char* name,
     new->io_read.data = new;
     new->io_write.data = new;
     new->io_timeout.data = new;
+    new->io_accept.data = new;
+    new->io_tcp_read.data = new;
+    new->io_tcp_write.data = new;
     ev_init(&new->io_read, ubond_rtun_read);
     ev_init(&new->io_write, ubond_rtun_write);
+    ev_init(&new->io_accept, ubond_rtun_accept);
+    ev_init(&new->io_tcp_read, ubond_rtun_tcp_read);
+    ev_init(&new->io_tcp_write, ubond_rtun_tcp_write);
     ev_timer_init(&new->io_timeout, ubond_rtun_check_timeout,
         0., UBOND_IO_TIMEOUT_DEFAULT);
     ev_timer_start(EV_A_ & new->io_timeout);
@@ -898,8 +1095,8 @@ ubond_rtun_new(const char* name,
     new->bytes_per_sec = 0;
     new->busy_writing = 0;
     new->lossless = 0;
-
-    memset(&new->old_pkts, 0, sizeof(new->old_pkts));
+    new->tcp_fill = NULL;
+    new->sending = NULL;
     update_process_title();
     return new;
 }
@@ -1024,13 +1221,12 @@ ubond_rtun_recalc_weight()
 }
 
 static int
-ubond_rtun_bind(ubond_tunnel_t* t)
+ubond_rtun_bind(ubond_tunnel_t* t, int fd, int socktype)
 {
     struct addrinfo hints, *res;
     struct ifreq ifr;
     char bindifstr[UBOND_IFNAMSIZ + 5];
-    int n, fd;
-
+    int n;
     memset(&hints, 0, sizeof(hints));
     /* AI_PASSIVE flag: the resulting address is used to bind
        to a socket for accepting incoming connections.
@@ -1039,8 +1235,7 @@ ubond_rtun_bind(ubond_tunnel_t* t)
        the unspecified address for that family. */
     hints.ai_flags = AI_PASSIVE;
     hints.ai_family = AF_UNSPEC;
-    fd = t->fd;
-    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_socktype = socktype;
 
     if (*t->bindaddr) {
         n = priv_getaddrinfo(t->bindaddr, t->bindport, &res, &hints);
@@ -1056,9 +1251,9 @@ ubond_rtun_bind(ubond_tunnel_t* t)
     if (*t->binddev) {
         snprintf(bindifstr, sizeof(bindifstr) - 1, " on %s", t->binddev);
     }
-    log_info(NULL, "%s bind to %s%s",
+    log_info(NULL, "%s bind to %s%s (type %d)",
         t->name, t->bindaddr ? t->bindaddr : "any",
-        bindifstr);
+        bindifstr, socktype);
 
     if (*t->binddev) {
         memset(&ifr, 0, sizeof(ifr));
@@ -1071,7 +1266,7 @@ ubond_rtun_bind(ubond_tunnel_t* t)
         n = bind(fd, res->ai_addr, res->ai_addrlen);
         freeaddrinfo(res);
         if (n < 0) {
-            log_warn(NULL, "%s bind error", t->name);
+            log_warn(NULL, "%s bind error on %d", t->name, fd);
             return -1;
         }
     }
@@ -1080,7 +1275,7 @@ ubond_rtun_bind(ubond_tunnel_t* t)
 }
 
 static int
-ubond_rtun_start(ubond_tunnel_t* t)
+ubond_rtun_start_socket(ubond_tunnel_t* t, int socktype)
 {
     int ret, fd = -1;
     char *addr, *port;
@@ -1088,7 +1283,7 @@ ubond_rtun_start(ubond_tunnel_t* t)
 #if defined(HAVE_FREEBSD) || defined(HAVE_OPENBSD)
     int fib = t->bindfib;
 #endif
-    fd = t->fd;
+
     if (t->server_mode) {
         addr = t->bindaddr;
         port = t->bindport;
@@ -1102,7 +1297,7 @@ ubond_rtun_start(ubond_tunnel_t* t)
     /* Initialize hints */
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_socktype = socktype;
 
     ret = priv_getaddrinfo(addr, port, &t->addrinfo, &hints);
     if (ret < 0 || !t->addrinfo) {
@@ -1118,19 +1313,23 @@ ubond_rtun_start(ubond_tunnel_t* t)
                  t->addrinfo->ai_socktype,
                  t->addrinfo->ai_protocol))
             < 0) {
-            log_warn(NULL, "%s socket creation error",
-                t->name);
+            log_warn(NULL, "%s socket creation error", t->name);
+            return -1;
         } else {
 /* Setting fib/routing-table is supported on FreeBSD and OpenBSD only */
 #if defined(HAVE_FREEBSD)
-            if (fib > 0 && setsockopt(fd, SOL_SOCKET, SO_SETFIB, &fib, sizeof(fib)) < 0)
+            if (fib > 0 && setsockopt(fd, SOL_SOCKET, SO_SETFIB, &fib, sizeof(fib)) < 0) {
+                log_warn(NULL, "Cannot set FIB %d for kernel socket", fib);
+                close(fd);
+                return -1;
+            }
 #elif defined(HAVE_OPENBSD)
             if (fib > 0 && setsockopt(fd, SOL_SOCKET, SO_RTABLE, &fib, sizeof(fib)) < 0) {
                 log_warn(NULL, "Cannot set FIB %d for kernel socket", fib);
-                goto error;
+                close(fd);
+                return -1;
             }
 #endif
-                t->fd = fd;
             break;
         }
         res = res->ai_next;
@@ -1139,37 +1338,125 @@ ubond_rtun_start(ubond_tunnel_t* t)
     if (fd < 0) {
         log_warnx("dns", "%s connection failed. Check DNS?",
             t->name);
-        goto error;
+        return -1;
     }
+    t->addrinfo = res;
 
     /* setup non blocking sockets */
     socklen_t val = 1;
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(socklen_t)) < 0) {
         log_warn(NULL, "%s setsockopt SO_REUSEADDR failed", t->name);
-        goto error;
-    }
-    if (*t->bindaddr || *t->binddev) {
-        if (ubond_rtun_bind(t) < 0) {
-            goto error;
-        }
+        close(fd);
+        return -1;
     }
 
-    /* set non blocking after connect... May lockup the entiere process */
-    ubond_sock_set_nonblocking(fd);
-    ubond_rtun_tick(t);
-    ev_io_set(&t->io_read, fd, EV_READ);
-    ev_io_set(&t->io_write, fd, EV_WRITE);
-    ev_io_start(EV_A_ & t->io_read);
-    t->io_timeout.repeat = UBOND_IO_TIMEOUT_DEFAULT / 2;
-    return 0;
-error:
-    if (t->fd > 0) {
-        close(t->fd);
-        t->fd = -1;
+    return fd;
+}
+
+static void socket_close(ubond_tunnel_t* t)
+{
+    log_warnx(NULL, "Unable to set up sockets");
+
+    if (ev_is_active(&t->io_read)) {
+        ev_io_stop(EV_A_ & t->io_read);
     }
+    if (ev_is_active(&t->io_accept)) {
+        ev_io_stop(EV_A_ & t->io_accept);
+    }
+    if (ev_is_active(&t->io_tcp_read)) {
+        ev_io_stop(EV_A_ & t->io_tcp_read);
+    }
+
+    if (t->fd > 0)
+        close(t->fd);
+    if (t->fd_tcp > 0)
+        close(t->fd_tcp);
+    if (t->fd_tcp_conn > 0)
+        close(t->fd_tcp_conn);
+    t->fd = -1;
+    t->fd_tcp = -1;
+    t->fd_tcp_conn = -1;
     if (t->io_timeout.repeat < UBOND_IO_TIMEOUT_MAXIMUM)
         t->io_timeout.repeat *= UBOND_IO_TIMEOUT_INCREMENT;
-    return -1;
+}
+static void ubond_rtun_accept(EV_P_ ev_io* w, int revents)
+{
+    ubond_tunnel_t* t = w->data;
+
+    t->fd_tcp = accept(t->fd_tcp_conn, 0, 0);
+    log_info(NULL, "%s TCP socket connection accepted (fd %d)", t->name, t->fd_tcp);
+
+    ev_io_set(&t->io_tcp_read, t->fd_tcp, EV_READ);
+    ev_io_start(EV_A_ & t->io_tcp_read);
+    ev_io_set(&t->io_tcp_write, t->fd_tcp, EV_WRITE);
+    //ev_io_start(EV_A_ & t->io_tcp_write);
+}
+
+static void
+ubond_rtun_start(ubond_tunnel_t* t)
+{
+    if (t->fd < 0) {
+        if ((t->fd = ubond_rtun_start_socket(t, SOCK_DGRAM)) < 0) {
+            return socket_close(t);
+        }
+
+        /* set non blocking after connect... May lockup the entiere process */
+        ubond_sock_set_nonblocking(t->fd);
+        ubond_rtun_tick(t);
+        ev_io_set(&t->io_read, t->fd, EV_READ);
+        ev_io_set(&t->io_write, t->fd, EV_WRITE);
+        ev_io_start(EV_A_ & t->io_read);
+        t->io_timeout.repeat = UBOND_IO_TIMEOUT_DEFAULT / 2;
+    }
+    //    if (*t->bindaddr || *t->binddev) {
+    if (ubond_rtun_bind(t, t->fd, SOCK_DGRAM) < 0) {
+        return socket_close(t);
+    }
+    //    }
+    if (t->server_mode) {
+        if (t->fd_tcp_conn < 0) {
+            if ((t->fd_tcp_conn = ubond_rtun_start_socket(t, SOCK_STREAM)) < 0) {
+                return socket_close(t);
+            }
+            //    }
+            if (ubond_rtun_bind(t, t->fd_tcp_conn, SOCK_STREAM) < 0) {
+                return socket_close(t);
+            }
+            if (listen(t->fd_tcp_conn, 1)) {
+                return socket_close(t);
+            } //listen for a single tcp connection
+            log_info(NULL, "%s tcp tunnel socket listening on %s (port %s   UDP fd: %d TCP fd: %d)",
+                t->name, t->bindaddr ? t->bindaddr : "any", t->bindport, t->fd, t->fd_tcp_conn);
+            ev_io_set(&t->io_accept, t->fd_tcp_conn, EV_READ);
+            ev_io_start(EV_A_ & t->io_accept);
+        }
+    } else {
+        if (t->fd_tcp < 0) {
+            if ((t->fd_tcp = ubond_rtun_start_socket(t, SOCK_STREAM)) < 0) {
+                return socket_close(t);
+            }
+        }
+        if (ubond_rtun_bind(t, t->fd_tcp, SOCK_STREAM) < 0) {
+            return socket_close(t);
+        }
+        ubond_sock_set_nonblocking(t->fd_tcp);
+        if (connect(t->fd_tcp, t->addrinfo->ai_addr, t->addrinfo->ai_addrlen)) {
+            if (errno == EINPROGRESS) {
+                log_warn(NULL, "%s tcp tunnel socket CONNECTTING to %s (port %s   UDP fd: %d TCP fd: %d)",
+                    t->name, t->destaddr, t->destport, t->fd, t->fd_tcp);
+            } else {
+                log_info(NULL, "%s tcp tunnel socket CANT CONNECT to %s (port %s   UDP fd: %d TCP fd: %d)",
+                    t->name, t->destaddr, t->destport, t->fd, t->fd_tcp);
+                return socket_close(t);
+            }
+        } else {
+            log_info(NULL, "%s tcp tunnel socket connected to %s (port %s   UDP fd: %d TCP fd: %d)",
+                t->name, t->destaddr, t->destport, t->fd, t->fd_tcp);
+        }
+        ev_io_set(&t->io_tcp_read, t->fd_tcp, EV_READ);
+        ev_io_set(&t->io_tcp_write, t->fd_tcp, EV_WRITE);
+        ev_io_start(EV_A_ & t->io_tcp_read);
+    }
 }
 
 static void
@@ -1261,6 +1548,7 @@ ubond_rtun_status_up(ubond_tunnel_t* t)
     t->srtt_d = 0;
     t->srtt_c = 0;
     t->loss = 0;
+    t->seq_vect = -1;
     t->bm_data = 0;
     ubond_update_status();
     update_process_title();
@@ -1281,8 +1569,6 @@ ubond_rtun_status_up(ubond_tunnel_t* t)
     while (!UBOND_TAILQ_EMPTY(&t->hpsbuf)) {
         ubond_pkt_release(UBOND_TAILQ_POP_LAST(&t->hpsbuf));
     }
-
-    ubond_reorder_reset(); // reset the re-order buffer,
 }
 
 void ubond_rtun_status_down(ubond_tunnel_t* t)
@@ -1300,6 +1586,7 @@ void ubond_rtun_status_down(ubond_tunnel_t* t)
     t->saved_timestamp = -1;
     t->saved_timestamp_received_at = 0;
 
+    /*
     ubond_tunnel_t* tun;
     LIST_FOREACH(tun, &rtuns, entries)
     {
@@ -1309,7 +1596,7 @@ void ubond_rtun_status_down(ubond_tunnel_t* t)
     if (!tun)
 
         ubond_rtun_recalc_weight();
-
+*/
     // hpsbuf has tun specific stuff in it, drop it.
     while (!UBOND_TAILQ_EMPTY(&t->hpsbuf)) {
         ubond_pkt_release(UBOND_TAILQ_POP_LAST(&t->hpsbuf));
@@ -1343,6 +1630,8 @@ void ubond_rtun_status_down(ubond_tunnel_t* t)
     have a lot of packets in flight which will never arrive, so recovery MAY be
     quicker with a flush...*/
     }
+
+    return socket_close(t);
 }
 
 static void
@@ -1389,6 +1678,7 @@ ubond_rtun_challenge_send(ubond_tunnel_t* t)
         UBOND_CHALLENGE_AUTH,
         htobe16(UBOND_PROTOCOL_VERSION),
         htobe64((t->quota) ? t->permitted : 0),
+        ""
     };
     strcpy(challenge.password, ubond_options.password);
 
@@ -1397,7 +1687,9 @@ ubond_rtun_challenge_send(ubond_tunnel_t* t)
 
     pkt->p.type = UBOND_PKT_AUTH;
 
-    t->status = UBOND_AUTHSENT;
+    if (t->status < UBOND_AUTHSENT)
+        t->status = UBOND_AUTHSENT;
+
     ubond_rtun_do_send(t, 0);
     log_debug("protocol", "%s ubond_rtun_challenge_send", t->name);
 }
@@ -1417,6 +1709,7 @@ ubond_rtun_send_auth_ok(ubond_tunnel_t* t)
         UBOND_CHALLENGE_OK,
         htobe16(UBOND_PROTOCOL_VERSION),
         htobe64((t->quota) ? t->permitted : 0),
+        ""
     };
     strcpy(challenge.password, ubond_options.password);
 
@@ -1429,6 +1722,7 @@ ubond_rtun_send_auth_ok(ubond_tunnel_t* t)
     log_info("protocol", "%s sending authenticate OK", t->name);
 }
 
+#if 0
 static void
 ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint16_t tun_seqn, uint16_t len)
 {
@@ -1453,7 +1747,9 @@ ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint16_t tun_seqn, uint16_t 
 
     log_debug("resend", "Request resend 0x%x (lost from tunnel %s)", /* t->name,*/ tun_seqn, loss_tun->name);
 }
+#endif
 
+#if 0
 static ubond_tunnel_t* ubond_find_tun(uint16_t id)
 {
     ubond_tunnel_t* t;
@@ -1464,7 +1760,8 @@ static ubond_tunnel_t* ubond_find_tun(uint16_t id)
     }
     return NULL;
 }
-
+#endif
+#if 0
 static void
 ubond_rtun_resend(struct resend_data* d)
 {
@@ -1503,32 +1800,23 @@ ubond_rtun_resend(struct resend_data* d)
         }
     }
 }
+#endif
 
 static void
 ubond_rtun_tick_connect(ubond_tunnel_t* t)
 {
-    ev_tstamp now = ev_now(EV_DEFAULT_UC);
     if (t->server_mode) {
-        if (t->fd < 0) {
-            if (ubond_rtun_start(t) == 0) {
-                t->conn_attempts = 0;
-            } else {
-                return;
-            }
+        if (t->fd < 0 || t->fd_tcp < 0) {
+            ubond_rtun_start(t);
         }
     } else {
         if (t->status < UBOND_AUTHOK) {
-            t->conn_attempts++;
-            t->last_connection_attempt = now;
-            if (t->fd < 0) {
-                if (ubond_rtun_start(t) == 0) {
-                    t->conn_attempts = 0;
-                } else {
-                    return;
-                }
+            if (t->fd < 0 || t->fd_tcp < 0) {
+                ubond_rtun_start(t);
+            } else {
+                ubond_rtun_challenge_send(t);
             }
         }
-        ubond_rtun_challenge_send(t);
     }
 }
 ev_tstamp last = 0;
@@ -1545,6 +1833,8 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
 
     float max_srtt = 0;
     float min_srtt = 0;
+    float max_bw_in = 0;
+    float min_bw_in = 0;
 
     ubond_tunnel_t* t;
     int tuns = 0;
@@ -1581,6 +1871,10 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
             // calc measured bandwidth for INCOMMING
             t->bandwidth_measured = (t->bm_data / 128) * INVERSEBWCALCTIME; // kbits/sec
             t->bm_data = 0;
+            if (!min_bw_in || t->bandwidth_measured < min_bw_in)
+                min_bw_in = t->bandwidth_measured;
+            if (!max_bw_in || t->bandwidth_measured > max_bw_in)
+                max_bw_in = t->bandwidth_measured;
 
             double bandwidth_sent = ((t->bytes_since_adjust / 128.0) / diff);
 
@@ -1658,8 +1952,8 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
         t->last_adjust = now;
     }
 
-    if (min_srtt && max_srtt) {
-        max_size_outoforder = max_srtt / min_srtt;
+    if (min_srtt && max_srtt && min_bw_in && max_bw_in) {
+        max_size_outoforder = (max_srtt / min_srtt) * (max_bw_in / min_bw_in);
     }
 
     ubond_rtun_recalc_weight();
@@ -1753,7 +2047,7 @@ ubond_rtun_check_lossy(ubond_tunnel_t* tun)
     double loss = tun->sent_loss;
     int status_changed = 0;
     ev_tstamp now = ev_now(EV_DEFAULT_UC);
-    int keepalive_ok = ((tun->last_activity == 0) || (tun->last_activity + (UBOND_IO_TIMEOUT_DEFAULT * 2) + ((tun->srtt_av / 1000.0) * 2)) > now);
+    int keepalive_ok = ((tun->last_activity == 0) || (tun->last_activity + (UBOND_IO_TIMEOUT_DEFAULT * 5) + ((tun->srtt_av / 1000.0) * 2)) > now);
 
     if (!keepalive_ok && tun->status == UBOND_AUTHOK) {
         log_info("rtt", "%s keepalive reached threashold, last activity recieved %fs ago", tun->name, now - tun->last_activity);
@@ -1768,8 +2062,8 @@ ubond_rtun_check_lossy(ubond_tunnel_t* tun)
     } else if (loss >= LOSS_TOLERENCE && tun->status == UBOND_AUTHOK) {
         log_info("rtt", "%s packet loss reached threashold: %f%%/%f%%",
             tun->name, loss, LOSS_TOLERENCE);
-        //    tun->status = UBOND_LOSSY;
-        //    status_changed = 1;
+            tun->status = UBOND_LOSSY;
+            status_changed = 1;
     } else if (keepalive_ok && loss < LOSS_TOLERENCE && tun->status == UBOND_LOSSY) {
         log_info("rtt", "%s packet loss acceptable again: %f%%/%f%%",
             tun->name, loss, LOSS_TOLERENCE);
@@ -1825,9 +2119,10 @@ tuntap_io_event(EV_P_ ev_io* w, int revents)
 {
     if (revents & EV_READ) {
         ubond_pkt_t* pkt;
-        while (!ubond_pkt_list_is_full(&send_buffer) && (pkt = ubond_tuntap_read(&tuntap))) {
+        // while?
+        if (!ubond_pkt_list_is_full(&send_buffer) && (pkt = ubond_tuntap_read(&tuntap))) {
             pkt->stream = NULL;
-            pkt->sent_tun = NULL;
+            //pkt->sent_tun = NULL;
             pkt->p.data_seq = next_data_seq(); // this is normal data, not tcp data
             ubond_buffer_write(&send_buffer, pkt);
             ubond_tunnel_t* t;
@@ -1841,7 +2136,7 @@ tuntap_io_event(EV_P_ ev_io* w, int revents)
                 }
             }
         }
-        if (ubond_pkt_list_is_full(&send_buffer)) {
+        if (ubond_pkt_list_is_full_watermark(&send_buffer)) {
             if (ev_is_active(&tuntap.io_read)) {
                 ev_io_stop(EV_A_ & tuntap.io_read);
             }
@@ -2111,7 +2406,7 @@ int main(int argc, char** argv)
         //int i=0;
         //LIST_FOREACH(t, &rtuns, entries) {i++;}
         //ubond_pkt_list_init(&send_buffer, i*2);
-        ubond_pkt_list_init(&send_buffer, 102400);
+        ubond_pkt_list_init(&send_buffer, PKTBUFSIZE * 100);
         ubond_pkt_list_init(&hpsend_buffer, PKTBUFSIZE);
     }
 

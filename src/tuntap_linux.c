@@ -60,7 +60,11 @@ ubond_tuntap_write(struct tuntap_s *tuntap, ubond_pkt_t *pkt)
     ubond_pkt_release(pkt);
     if (ret < 0)
     {
-        log_warn("tuntap", "%s write error", tuntap->devname);
+        if (errno==EAGAIN || errno==EWOULDBLOCK) {
+            log_warn("tuntap","%s would block", tuntap->devname);
+        } else {
+            log_warn("tuntap", "%s write error", tuntap->devname);
+        }
     } else {
         if (ret != pkt->p.len)
         {

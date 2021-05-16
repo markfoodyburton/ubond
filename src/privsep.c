@@ -104,7 +104,7 @@ static void reset_default_signals();
 
 int priv_init(char* argv[], char* username)
 {
-    int i, fd, socks[2], cmd;
+    int i, fd=0, socks[2], cmd;
     int nullfd;
     int mtu;
     int tuntapmode;
@@ -304,15 +304,15 @@ int priv_init(char* argv[], char* username)
              */
             *errormessage = '\0';
             if (stat(path, &st) < 0) {
-                snprintf(errormessage, ERRMSGSIZ, "Unable to open file %s:%s",
+                snprintf(errormessage, ERRMSGSIZ, "Unable to open file %.100s:%s",
                     path, strerror(errno));
             } else if (st.st_mode & (S_IRWXG | S_IRWXO)) {
                 snprintf(errormessage, ERRMSGSIZ,
-                    "%s is group/other accessible",
+                    "%.100s is group/other accessible",
                     path);
             } else if (!(st.st_mode & S_IXUSR)) {
                 snprintf(errormessage, ERRMSGSIZ,
-                    "%s is not executable",
+                    "%.100s is not executable",
                     path);
             } else {
                 strlcpy(script_path, path, len);
@@ -838,6 +838,7 @@ may_read(int fd, void* buf, size_t n)
         case -1:
             if (errno == EINTR || errno == EAGAIN)
                 continue;
+            return (1);
         case 0:
             return (1);
         default:
@@ -861,6 +862,7 @@ must_read(int fd, void* buf, size_t n)
         case -1:
             if (errno == EINTR || errno == EAGAIN)
                 continue;
+            _exit(0);
         case 0:
             _exit(0);
         default:
@@ -883,6 +885,7 @@ must_write(int fd, void* buf, size_t n)
         case -1:
             if (errno == EINTR || errno == EAGAIN)
                 continue;
+            _exit(0);
         case 0:
             _exit(0);
         default:

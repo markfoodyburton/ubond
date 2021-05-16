@@ -149,9 +149,11 @@ typedef struct ubond_tunnel_s
     uint16_t id;               /* Unique ID which will be shared between tunnel end
                              points (e.g. port number) */
     int fd;               /* socket file descriptor */
+    int fd_tcp;
+    int fd_tcp_conn;
+
     int server_mode;      /* server or client */
     int disconnects;      /* is it stable ? */
-    int conn_attempts;    /* connection attempts */
     int fallback_only;    /* if set, this link will be used when all others are down */
     uint64_t pkts_cnt;
     uint8_t sent_loss;   /* loss as reported by far end */
@@ -186,9 +188,11 @@ typedef struct ubond_tunnel_s
     struct addrinfo *addrinfo;
     enum chap_status status;    /* Auth status */
     ev_tstamp last_activity;
-    ev_tstamp last_connection_attempt;
     ev_io io_read;
     ev_io io_write;
+    ev_io io_accept;
+    ev_io io_tcp_read;
+    ev_io io_tcp_write;
     ev_timer io_timeout;
     ev_check check_ev;
     ev_idle idle_ev;
@@ -200,7 +204,9 @@ typedef struct ubond_tunnel_s
     int lossless;
     int busy_writing;
 
-    ubond_pkt_t *old_pkts[RESENDBUFSIZE];
+    ubond_pkt_t *tcp_fill;
+    ubond_pkt_t *sending;
+    //ubond_pkt_t *old_pkts[RESENDBUFSIZE];
 } ubond_tunnel_t;
 
 #ifdef HAVE_FILTERS
@@ -232,6 +238,7 @@ ubond_tunnel_t *ubond_filters_choose(uint32_t pktlen, const u_char *pktdata);
 
 void ubond_buffer_write(ubond_pkt_list_t* buffer, ubond_pkt_t* p);
 int ubond_pkt_list_is_full(ubond_pkt_list_t* list);
+int ubond_pkt_list_is_full_watermark(ubond_pkt_list_t* list);
 
 #include "privsep.h"
 #include "log.h"

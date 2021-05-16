@@ -57,7 +57,7 @@ int ubond_config(int config_file_fd, int first_time)
 
     uint32_t default_timeout = 60;
     uint32_t default_server_mode = 0; /* 0 => client */
-    uint32_t cleartext_data = 0;
+    //uint32_t cleartext_data = 0;
     uint32_t static_tunnel = 0;
     uint32_t fallback_only = 0;
     uint32_t tcp_socket = 1211;

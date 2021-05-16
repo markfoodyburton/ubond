@@ -8,6 +8,7 @@
 typedef struct stream_t {
     int fd;
     struct ev_io io_read;
+    struct ev_io io_write;    
     uint16_t flow_id;
     uint16_t preset_flow_id;
     uint16_t data_seq;
@@ -18,6 +19,7 @@ typedef struct stream_t {
 
     ubond_pkt_list_t sent;
     ubond_pkt_list_t received;
+    ubond_pkt_list_t draining;
 
     TAILQ_ENTRY(stream_t) entry;
 } stream_t;
