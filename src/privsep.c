@@ -439,7 +439,7 @@ int priv_init(char* argv[], char* username)
 #endif
             break;
         case PRIV_SET_TRANSPARENT: {
-
+printf("HERE\n");
             char* bindhost = "0.0.0.0";
             int serverfd = 0;
             int bindport;

@@ -17,10 +17,14 @@ typedef struct stream_t {
     uint16_t seq_to_ack;
     uint16_t next_seq;
 
-    ubond_pkt_list_t sent;
+    int stall;
+
+    ubond_v_pkt_list_t sent;
     ubond_pkt_list_t received;
     ubond_pkt_list_t draining;
 
+    ev_timer resend_timer;
+    
     TAILQ_ENTRY(stream_t) entry;
 } stream_t;
 

@@ -8,7 +8,7 @@ AUTOMAKE_OPTIONS = foreign
 sbin_PROGRAMS = ubond
 ubond_SOURCES = \
     includes.h defines.h \
-    pkt.h \
+    pkt.h pkt.c \
     configlib.c configlib.h \
     config.c \
     tool.c tool.h \

@@ -26,3 +26,9 @@ ubond_timestamp16_diff(uint16_t tsnew, uint16_t tsold)
     }
     return diff;
 }
+
+inline uint64_t
+ubond_timestamp64_diff(uint64_t tsnew, uint64_t tsold)
+{
+    return (int64_t)(tsnew - tsold);
+}

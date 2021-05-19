@@ -77,7 +77,7 @@ void ubond_reorder_enable()
 }
 
 extern float max_size_outoforder;
-inline uint32_t max_size()
+uint32_t max_size()
 {
     int s = max_size_outoforder * 10; // e.g. we consider re-orders up to 10 packets deep - way more than we need.
     if (s < MIN_REORDERBUF)

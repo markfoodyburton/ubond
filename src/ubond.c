@@ -74,65 +74,8 @@ uint64_t bandwidthdata = 0;
 double bandwidth = 0;
 uint64_t out_resends = 0;
 
-double srtt_min = 0;
+float srtt_max = 0;
 float max_size_outoforder = 20;
-
-ubond_pkt_list_t pool;
-uint64_t pool_out = 0;
-ubond_pkt_t* ubond_pkt_get()
-{
-    ubond_pkt_t* p;
-    if (!UBOND_TAILQ_EMPTY(&pool)) {
-        p = UBOND_TAILQ_FIRST(&pool);
-        UBOND_TAILQ_REMOVE(&pool, p);
-    } else {
-        p = malloc(sizeof(struct ubond_pkt_t));
-        p->usecnt = 0;
-    }
-
-    p->stream = NULL;
-    //p->sent_tun = NULL;
-
-    if (p->usecnt != 0) {
-        fatalx("USECNT !=0 (get)");
-    }
-    p->usecnt++;
-    pool_out++;
-    return p;
-};
-void ubond_pkt_release(ubond_pkt_t* p)
-{
-    //    if (p->sent_tun) {
-    //        log_warnx("PKT", "Packet has sent_tun on release?");
-    //    }
-    pool_out--;
-
-    p->usecnt--;
-    if (p->usecnt != 0) {
-        fatalx("USECNT !=0 (release)");
-    }
-    UBOND_TAILQ_INSERT_HEAD(&pool, p);
-}
-void ubond_pkt_insert(ubond_pkt_list_t* list, ubond_pkt_t* pkt)
-{
-    if (list->length >= list->max_size) {
-        log_warnx("lists", "buffer overflow");
-    }
-    UBOND_TAILQ_INSERT_HEAD(list, pkt);
-}
-int ubond_pkt_list_is_full(ubond_pkt_list_t* list)
-{
-    return (list->length >= list->max_size);
-}
-int ubond_pkt_list_is_full_watermark(ubond_pkt_list_t* list)
-{
-    return (list->length >= (list->max_size) / 2);
-}
-void ubond_pkt_list_init(ubond_pkt_list_t* list, uint64_t size)
-{
-    UBOND_TAILQ_INIT(list);
-    list->max_size = size;
-}
 
 #define LOSS_TOLERENCE 50.0
 #define BANDWIDTHCALCTIME 0.1
@@ -264,7 +207,7 @@ int is_tcp(ubond_pkt_t* pkt)
     // should packet inspect, and only re-order TCP packets !
     // 17 - UDP
     // 6 - TCP
-
+    return 0;
     if (pkt->p.type == UBOND_PKT_TCP_OPEN
         || pkt->p.type == UBOND_PKT_TCP_CLOSE
         || pkt->p.type == UBOND_PKT_TCP_DATA
@@ -355,7 +298,7 @@ int ubond_sock_set_nonblocking(int fd)
 
 inline static void ubond_rtun_tick(ubond_tunnel_t* tun)
 {
-    tun->last_activity = ev_now(EV_DEFAULT_UC);
+    tun->last_activity = ev_now(EV_A);
 }
 
 /* Inject the packet to the tuntap device (real network) */
@@ -374,7 +317,7 @@ void ubond_rtun_inject_tuntap(ubond_pkt_t* pkt)
     // }
 }
 
-inline int count_1s(uint64_t b)
+int count_1s(uint64_t b)
 {
     b -= ((b >> 1) & 0x5555555555555555ULL);
     b = ((b >> 2) & 0x3333333333333333ULL) + (b & 0x3333333333333333ULL);
@@ -390,7 +333,8 @@ ubond_loss_update(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     uint16_t seq = pkt->p.tun_seq;
     int16_t d = (int16_t)(seq - tun->seq_last);
 
-    if (seq==0) return;
+    if (seq == 0)
+        return;
 
     tun->sent_loss = pkt->p.sent_loss;
     if (tun->sent_loss >= (LOSS_TOLERENCE / 4.0)) {
@@ -584,7 +528,7 @@ static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents)
                 MSG_DONTWAIT, (struct sockaddr*)&clientaddr, &addrlen);
             if (len < 0) {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    log_warn("net", "%s read error", tun->name);
+                    log_warn("net", "%s tcp read error", tun->name);
                     ubond_rtun_status_down(tun);
                     ubond_pkt_release(pkt);
                     tun->tcp_fill = NULL;
@@ -606,7 +550,7 @@ static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents)
                                     : 0;
             if (len < 0) {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    log_warn("net", "%s read error", tun->name);
+                    log_warn("net", "%s tcp read error", tun->name);
                     ubond_rtun_status_down(tun);
                     ubond_pkt_release(pkt);
                     tun->tcp_fill = NULL;
@@ -644,7 +588,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
         MSG_DONTWAIT, (struct sockaddr*)&clientaddr, &addrlen);
     if (len < 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            log_warn("net", "%s read error", tun->name);
+            log_warn("net", "%s read error on fd %d", tun->name, tun->fd);
             ubond_rtun_status_down(tun);
         }
         ubond_pkt_release(pkt);
@@ -652,7 +596,6 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
     }
     if (len == 0) {
         log_info("protocol", "%s peer closed the connection", tun->name);
-        printf("Closing %d (udl)\n", tun->fd);
         ubond_rtun_status_down(tun);
         ubond_pkt_release(pkt);
         return;
@@ -695,9 +638,10 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
 static void
 ubond_update_srtt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
-    if (is_tcp(pkt)) return;
+    if (is_tcp(pkt))
+        return;
     ubond_proto_t* proto = &pkt->p;
-    uint64_t now64 = ubond_timestamp64(ev_now(EV_DEFAULT_UC));
+    uint64_t now64 = ubond_timestamp64(ev_now(EV_A));
     if (proto->timestamp != (uint16_t)-1) {
         tun->saved_timestamp = proto->timestamp;
         tun->saved_timestamp_received_at = now64;
@@ -753,8 +697,8 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     pkt->len = wlen;
 
     // significant time can have elapsed, so maybe better use the current time
-    // rather than... uint64_t now64 = ubond_timestamp64(ev_now(EV_DEFAULT_UC)); instead of ev_time()
-    uint64_t now64 = ubond_timestamp64(ev_now(EV_DEFAULT_UC));
+    // rather than... uint64_t now64 = ubond_timestamp64(ev_now(EV_A)); instead of ev_time()
+    uint64_t now64 = ubond_timestamp64(ev_now(EV_A));
     /* we have a recent received timestamp */
     if (tun->saved_timestamp != -1) {
         if (now64 - tun->saved_timestamp_received_at < 1000) {
@@ -786,9 +730,11 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             if (pkt->p.type != UBOND_PKT_AUTH) {
                 log_warn("net", "%s write error", tun->name);
+                UBOND_TAILQ_INSERT_TAIL(&send_buffer, pkt);
                 ubond_rtun_status_down(tun);
-            } // dont report AUTH packet loss, as we know that !
-            ubond_pkt_release(pkt);
+            } else {
+                ubond_pkt_release(pkt);
+            }
             return 0;
         } else {
             // we should never attempt a send on a blockable tunnel, so we should
@@ -815,6 +761,7 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         }
         tun->bytes_since_adjust += wlen + IP4_UDP_OVERHEAD;
 
+        pkt->last_sent = now64;
         if (tcp) {
             if (!ev_is_active(&tun->io_tcp_write)) {
                 ev_io_start(EV_A_ & tun->io_tcp_write);
@@ -847,7 +794,7 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 static void
 ubond_rtun_do_send(ubond_tunnel_t* tun, int timed)
 {
-    ev_tstamp now = ev_now(EV_DEFAULT_UC);
+    ev_tstamp now = ev_now(EV_A);
     ev_tstamp diff = now - tun->last_adjust;
 
     // if there is hp stuff for us - SEND IT !
@@ -921,7 +868,9 @@ ubond_rtun_write(EV_P_ ev_io* w, int revents)
         if (pkt->sent < pkt->len) {
             log_warnx("protocol", "Incomplete UDP packet recieved!");
         }
-        ubond_pkt_release(pkt);
+        if (pkt->stream)
+            tcp_sent(pkt->stream, pkt);
+        ubond_pkt_release_s(pkt);
         tun->send_timer.repeat = (double)(pkt->len + IP4_UDP_OVERHEAD) / tun->bytes_per_sec;
         tun->sending = NULL;
     }
@@ -944,7 +893,7 @@ static void ubond_rtun_tcp_write(EV_P_ ev_io* w, int revents)
         }
         if (ret < 0) {
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                log_warn("net", "%s write error", tun->name);
+                log_warn("net", "%s tcp write error", tun->name);
                 ubond_rtun_status_down(tun);
             }
         }
@@ -957,8 +906,7 @@ static void ubond_rtun_tcp_write(EV_P_ ev_io* w, int revents)
         if (pkt) {
             if (pkt->stream)
                 tcp_sent(pkt->stream, pkt);
-            else
-                ubond_pkt_release(pkt);
+            ubond_pkt_release_s(pkt); // NB if stream wants it, it will have usecnt>0
             //            log_debug("tcp", "> %s sent all %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x fd:%d)",
             //                tun->name, pkt->len, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq, tun->fd_tcp);
             tun->send_timer.repeat = (double)(pkt->len + IP4_UDP_OVERHEAD) / tun->bytes_per_sec;
@@ -1090,7 +1038,7 @@ ubond_rtun_new(const char* name,
     ev_timer_init(&new->send_timer, &ubond_rtun_write_timeout, 0., 0.01);
     ev_timer_start(EV_A_ & new->send_timer);
 
-    new->last_adjust = ev_now(EV_DEFAULT_UC);
+    new->last_adjust = ev_now(EV_A);
     new->bytes_since_adjust = 0;
     new->bytes_per_sec = 0;
     new->busy_writing = 0;
@@ -1330,6 +1278,7 @@ ubond_rtun_start_socket(ubond_tunnel_t* t, int socktype)
                 return -1;
             }
 #endif
+            log_warn(NULL, "%s socket creation success %d", t->name, fd);
             break;
         }
         res = res->ai_next;
@@ -1355,7 +1304,7 @@ ubond_rtun_start_socket(ubond_tunnel_t* t, int socktype)
 
 static void socket_close(ubond_tunnel_t* t)
 {
-    log_warnx(NULL, "Unable to set up sockets");
+    log_warnx(NULL, "Closing sockets");
 
     if (ev_is_active(&t->io_read)) {
         ev_io_stop(EV_A_ & t->io_read);
@@ -1400,6 +1349,9 @@ ubond_rtun_start(ubond_tunnel_t* t)
             return socket_close(t);
         }
 
+        if (ubond_rtun_bind(t, t->fd, SOCK_DGRAM) < 0) {
+            return socket_close(t);
+        }
         /* set non blocking after connect... May lockup the entiere process */
         ubond_sock_set_nonblocking(t->fd);
         ubond_rtun_tick(t);
@@ -1408,11 +1360,7 @@ ubond_rtun_start(ubond_tunnel_t* t)
         ev_io_start(EV_A_ & t->io_read);
         t->io_timeout.repeat = UBOND_IO_TIMEOUT_DEFAULT / 2;
     }
-    //    if (*t->bindaddr || *t->binddev) {
-    if (ubond_rtun_bind(t, t->fd, SOCK_DGRAM) < 0) {
-        return socket_close(t);
-    }
-    //    }
+
     if (t->server_mode) {
         if (t->fd_tcp_conn < 0) {
             if ((t->fd_tcp_conn = ubond_rtun_start_socket(t, SOCK_STREAM)) < 0) {
@@ -1539,7 +1487,7 @@ static void
 ubond_rtun_status_up(ubond_tunnel_t* t)
 {
     enum chap_status old_status = t->status;
-    ev_tstamp now = ev_now(EV_DEFAULT_UC);
+    ev_tstamp now = ev_now(EV_A);
     t->status = UBOND_AUTHOK;
     t->last_activity = now;
     t->saved_timestamp = -1;
@@ -1604,7 +1552,8 @@ void ubond_rtun_status_down(ubond_tunnel_t* t)
     // everythign in our send buffer, we'll drop - they will bound to ask for
     // more, and better they ask for the right things
     while (!UBOND_TAILQ_EMPTY(&t->sbuf)) {
-        ubond_pkt_release(UBOND_TAILQ_POP_LAST(&t->sbuf));
+        ubond_pkt_t* l = UBOND_TAILQ_POP_LAST(&t->sbuf);
+        UBOND_TAILQ_INSERT_TAIL(&send_buffer, l);
     }
     // for the normal buffer, lets request resends of all possible packets from
     // the last one we recieved
@@ -1822,7 +1771,7 @@ ubond_rtun_tick_connect(ubond_tunnel_t* t)
 ev_tstamp last = 0;
 void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
 {
-    ev_tstamp now = ev_now(EV_DEFAULT_UC);
+    ev_tstamp now = ev_now(EV_A);
     ev_tstamp diff = BANDWIDTHCALCTIME;
     if (last && (now - last) > BANDWIDTHCALCTIME / 2 && (now - last) < BANDWIDTHCALCTIME * 2) {
         diff = now - last;
@@ -1853,9 +1802,9 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
                 if (t->srtt_min == 0 || t->srtt < t->srtt_min) {
                     t->srtt_min = t->srtt;
                 }
-                if (srtt_min == 0 || t->srtt < srtt_min) {
-                    srtt_min = t->srtt;
-                }
+                //                if (srtt_min == 0 || t->srtt < srtt_min) {
+                //                    srtt_min = t->srtt;
+                //                }
                 t->srtt_d = 0;
                 t->srtt_c = 0;
             } else {
@@ -1952,8 +1901,9 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
         t->last_adjust = now;
     }
 
-    if (min_srtt && max_srtt && min_bw_in && max_bw_in) {
+    if (min_srtt > 0 && max_srtt > 0 && min_bw_in > 0 && max_bw_in > 0) {
         max_size_outoforder = (max_srtt / min_srtt) * (max_bw_in / min_bw_in);
+        srtt_max = max_srtt;
     }
 
     ubond_rtun_recalc_weight();
@@ -2046,7 +1996,7 @@ ubond_rtun_check_lossy(ubond_tunnel_t* tun)
 {
     double loss = tun->sent_loss;
     int status_changed = 0;
-    ev_tstamp now = ev_now(EV_DEFAULT_UC);
+    ev_tstamp now = ev_now(EV_A);
     int keepalive_ok = ((tun->last_activity == 0) || (tun->last_activity + (UBOND_IO_TIMEOUT_DEFAULT * 5) + ((tun->srtt_av / 1000.0) * 2)) > now);
 
     if (!keepalive_ok && tun->status == UBOND_AUTHOK) {
@@ -2062,8 +2012,8 @@ ubond_rtun_check_lossy(ubond_tunnel_t* tun)
     } else if (loss >= LOSS_TOLERENCE && tun->status == UBOND_AUTHOK) {
         log_info("rtt", "%s packet loss reached threashold: %f%%/%f%%",
             tun->name, loss, LOSS_TOLERENCE);
-            tun->status = UBOND_LOSSY;
-            status_changed = 1;
+        tun->status = UBOND_LOSSY;
+        status_changed = 1;
     } else if (keepalive_ok && loss < LOSS_TOLERENCE && tun->status == UBOND_LOSSY) {
         log_info("rtt", "%s packet loss acceptable again: %f%%/%f%%",
             tun->name, loss, LOSS_TOLERENCE);
@@ -2097,7 +2047,7 @@ static void
 ubond_rtun_check_timeout(EV_P_ ev_timer* w, int revents)
 {
     ubond_tunnel_t* t = w->data;
-    ev_tstamp now = ev_now(EV_DEFAULT_UC);
+    ev_tstamp now = ev_now(EV_A);
 
     ubond_rtun_check_lossy(t);
 
@@ -2126,7 +2076,7 @@ tuntap_io_event(EV_P_ ev_io* w, int revents)
             pkt->p.data_seq = next_data_seq(); // this is normal data, not tcp data
             ubond_buffer_write(&send_buffer, pkt);
             ubond_tunnel_t* t;
-            // ev_now_update(EV_DEFAULT_UC);
+            // ev_now_update(EV_A);
             LIST_FOREACH(t, &rtuns, entries)
             {
                 if (!t->busy_writing) {
@@ -2368,7 +2318,7 @@ int main(int argc, char** argv)
     ubond_systemd_notify();
 #endif
 
-    UBOND_TAILQ_INIT(&pool);
+    ubond_init_pkts();
 
     priv_init(argv, ubond_options.unpriv_user);
     if (ubond_options.change_process_title)
@@ -2420,7 +2370,7 @@ int main(int argc, char** argv)
 
     ev_io_set(&tuntap.io_read, tuntap.fd, EV_READ);
     ev_io_set(&tuntap.io_write, tuntap.fd, EV_WRITE);
-    ev_io_start(loop, &tuntap.io_read);
+    ev_io_start(EV_A_ & tuntap.io_read);
 
     /* tcp socket init */
     socks_init();
@@ -2453,13 +2403,13 @@ int main(int argc, char** argv)
     ev_signal_init(&signal_sigint, ubond_quit, SIGINT);
     ev_signal_init(&signal_sigquit, ubond_quit, SIGQUIT);
     ev_signal_init(&signal_sigterm, ubond_quit, SIGTERM);
-    ev_signal_start(loop, &signal_hup);
-    ev_signal_start(loop, &signal_usr1);
-    ev_signal_start(loop, &signal_sigint);
-    ev_signal_start(loop, &signal_sigquit);
-    ev_signal_start(loop, &signal_sigterm);
+    ev_signal_start(EV_A_ & signal_hup);
+    ev_signal_start(EV_A_ & signal_usr1);
+    ev_signal_start(EV_A_ & signal_sigint);
+    ev_signal_start(EV_A_ & signal_sigquit);
+    ev_signal_start(EV_A_ & signal_sigterm);
 
-    ev_run(loop, 0);
+    ev_run(EV_A_ 0);
 
     free(_progname);
     return 0;
