@@ -26,9 +26,9 @@ struct tuntap_s
     int maxmtu;
     char devname[UBOND_IFNAMSIZ];
     enum tuntap_type type;
-  ubond_pkt_list_t sbuf; // no longer used
+//  ubond_pkt_list_t sbuf; // no longer used
     ev_io io_read;
-    ev_io io_write;
+//    ev_io io_write;
 };
 
 int ubond_tuntap_alloc(struct tuntap_s *tuntap);

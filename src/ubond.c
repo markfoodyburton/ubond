@@ -77,13 +77,41 @@ uint64_t out_resends = 0;
 float srtt_max = 0;
 float max_size_outoforder = 20;
 
-#define LOSS_TOLERENCE 50.0
-#define BANDWIDTHCALCTIME 0.1
-#define INVERSEBWCALCTIME 10
+#define LOSS_TOLERENCE 75.0
+#define BANDWIDTHCALCTIME 0.15
 static ev_timer bandwidth_calc_timer;
 
 ubond_pkt_list_t send_buffer; /* send buffer */
 ubond_pkt_list_t hpsend_buffer; /* send buffer */
+ubond_pkt_list_t incomming; /* incoming packet buffer */
+
+ev_idle read_pkt;
+
+
+#ifdef PROF_WATCH
+int last_watcher=NO_CHECKER;
+ev_tstamp last_time;
+ev_idle idle_check_watcher_ev;
+
+ev_tstamp checker_times[MAX_CHECKERS]={0};
+
+void check_watcher(enum checker_id name)
+{
+    ev_tstamp now=ev_time();
+    if (last_watcher) {
+        if (now - last_time > checker_times[name]) {
+            checker_times[name] = now - last_time;
+            printf("Worst time for %d - time %f\n", name, checker_times[name]);
+        }
+    }
+    last_watcher=name;
+    last_time = now;
+}
+static void idle_check_watcher(EV_P_ ev_idle* w, int revents)
+{
+    check_watcher(NO_CHECKER);
+}
+#endif
 
 void ubond_buffer_write(ubond_pkt_list_t* buffer, ubond_pkt_t* p)
 {
@@ -155,9 +183,11 @@ static struct option long_options[] = {
 static void ubond_rtun_start(ubond_tunnel_t* t);
 static void ubond_rtun_read(EV_P_ ev_io* w, int revents);
 static void ubond_rtun_write(EV_P_ ev_io* w, int revents);
+#ifdef TCP
 static void ubond_rtun_accept(EV_P_ ev_io* w, int revents);
 static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents);
 static void ubond_rtun_tcp_write(EV_P_ ev_io* w, int revents);
+#endif
 static void ubond_rtun_write_timeout(EV_P_ ev_timer* w, int revents);
 static void ubond_rtun_check_timeout(EV_P_ ev_timer* w, int revents);
 static void ubond_rtun_write_check(EV_P_ ev_check* w, int revents);
@@ -178,6 +208,7 @@ static void ubond_tuntap_init();
 static void ubond_rtun_choose(ubond_tunnel_t* rtun);
 static void ubond_rtun_check_lossy(ubond_tunnel_t* tun);
 static void ubond_update_srtt(ubond_tunnel_t* tun, ubond_pkt_t* pkt);
+static void ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt);
 
 static void
 usage(char** argv)
@@ -207,7 +238,6 @@ int is_tcp(ubond_pkt_t* pkt)
     // should packet inspect, and only re-order TCP packets !
     // 17 - UDP
     // 6 - TCP
-    return 0;
     if (pkt->p.type == UBOND_PKT_TCP_OPEN
         || pkt->p.type == UBOND_PKT_TCP_CLOSE
         || pkt->p.type == UBOND_PKT_TCP_DATA
@@ -218,6 +248,12 @@ int is_tcp(ubond_pkt_t* pkt)
         return 0;
     }
 }
+#ifdef TCP
+int use_tcp(ubond_pkt_t* pkt)
+{
+    return is_tcp();
+}
+#endif
 
 void preset_permitted(int argc, char** argv)
 {
@@ -270,6 +306,7 @@ void preset_permitted(int argc, char** argv)
 static void
 ubond_reset_perm(EV_P_ ev_signal* w, int revents)
 {
+    check_watcher(UBOND_RESET_PERM);
     ubond_tunnel_t* t;
     LIST_FOREACH(t, &rtuns, entries)
     {
@@ -359,20 +396,33 @@ ubond_loss_update(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         //            ubond_rtun_request_resend(tun, seq - d, d-1);
         //            }
         //        }
+        if (tun->seq_vect == -1 && tun->reorder_length > 3) tun->reorder_length--;
     } else {
         tun->seq_vect |= 1ull << (-d);
+        tun->reorder_length = (-d > tun->reorder_length)?-d:tun->reorder_length;
     }
+
     // according to RFC 3208 you can target the last two packets being out of order
-    int64_t v = tun->seq_vect | 0x8000000000000000ULL; // signed int.
-    tun->loss = 64 - count_1s(v >> 2);
+    // but that seems to be rubbish
+
+    //int64_t v = tun->seq_vect | 0x8000000000000000ULL; // signed int.
+    //tun->loss = 64 - count_1s(v >> (tun->reorder_length+1));
+    if ((tun->seq_vect & (0x1ULL << tun->reorder_length+1)) == 0) tun->loss_d++;
+    tun->loss_c++;
     tun->seq_last = seq;
 }
 
-/* read from the rtunnel => write directly to the tap send buffer */
-//static void
-//ubond_rtun_read(EV_P_ ev_io* w, int revents)
-//{
-//    ubond_tunnel_t* tun = w->data;
+static void
+ubond_rtun_read_idle(EV_P_ ev_idle* w, int reavents)
+{
+    check_watcher(UBOND_RTUN_READ_IDLE);
+    ubond_pkt_t *pkt = UBOND_TAILQ_POP_LAST(&incomming);
+    if (pkt) {
+        ubond_rtun_read_pkt(pkt->rec_tun, pkt);
+    } else {
+        ev_idle_stop(EV_A_ w);
+    }
+}
 
 static void
 ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
@@ -401,13 +451,13 @@ ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     //    if (!is_tcp(pkt)) {
     /* validate the received packet */
     ubond_loss_update(tun, pkt);
-    ubond_update_srtt(tun, pkt);
+    // ubond_update_srtt(tun, pkt); already done.
     //    }
     tun->pkts_cnt++;
 
     tun->recvbytes += len;
     tun->recvpackets += 1;
-    tun->bm_data += pkt->p.len;
+    // tun->bm_data += pkt->len; already done
     if (tun->quota) {
         if (tun->permitted > (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD)) {
             tun->permitted -= (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD);
@@ -416,8 +466,8 @@ ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         }
     }
 
-    log_debug("net", "< %s recv %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x, srtt=%f)",
-        tun->name, (int)len, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq, tun->srtt);
+    log_debug("net", "< %s recv %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x, srtt=%f, loss %d %x)",
+        tun->name, (int)len, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq, tun->srtt, tun->loss, tun->seq_vect);
     ubond_rtun_tick(tun);
 
     if (tun->status >= UBOND_AUTHOK) {
@@ -453,7 +503,7 @@ ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         case UBOND_PKT_TCP_CLOSE:
         case UBOND_PKT_TCP_DATA:
         case UBOND_PKT_TCP_ACK:
-            ubond_stream_write(pkt);
+            ubond_stream_write(pkt, tun);
             break;
 
         case UBOND_PKT_AUTH_OK:
@@ -507,9 +557,12 @@ ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     //    } while (1);
 }
 
+#ifdef TCP
 /* TCP read */
 static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents)
 {
+    check_watcher(UBOND_RTUN_TCP_READ);
+
     ubond_tunnel_t* tun = w->data;
     struct sockaddr_storage clientaddr;
     socklen_t addrlen = sizeof(clientaddr);
@@ -572,15 +625,18 @@ static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents)
         }
     } while (0);
 }
+#endif
 
 /* UDP read */
 static void
-ubond_rtun_read(EV_P_ ev_io* w, int revents)
+ubond_rtun_read(EV_P_ ev_io* w, int reavents)
 {
+    check_watcher(UBOND_RTUN_READ);
     ubond_tunnel_t* tun = w->data;
     struct sockaddr_storage clientaddr;
     socklen_t addrlen = sizeof(clientaddr);
     ssize_t len;
+//    do {
     ubond_pkt_t* pkt = ubond_pkt_get();
 
     len = recvfrom(tun->fd, &(pkt->p),
@@ -603,6 +659,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
     betoh_proto(&(pkt->p));
 
     pkt->len = len; // stamp the wire length
+    tun->bm_data += len;
 
     if (!tun->addrinfo)
         fatalx("tun->addrinfo is NULL!");
@@ -631,15 +688,24 @@ ubond_rtun_read(EV_P_ ev_io* w, int revents)
             memcpy(tun->addrinfo->ai_addr, &clientaddr, addrlen);
         }
     }
+    ubond_update_srtt(tun, pkt);
+    pkt->rec_tun = tun;
+    UBOND_TAILQ_INSERT_HEAD(&incomming, pkt);
 
-    ubond_rtun_read_pkt(tun, pkt);
+    if (!ev_is_active(&read_pkt)) {
+        ev_idle_start(EV_A_ &read_pkt);
+    }
+//    } while(1);
+//    ubond_rtun_read_pkt(tun, pkt);
 }
 
 static void
 ubond_update_srtt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
-    if (is_tcp(pkt))
+#ifdef TCP
+    if (use_tcp(pkt))
         return;
+#endif
     ubond_proto_t* proto = &pkt->p;
     uint64_t now64 = ubond_timestamp64(ev_now(EV_A));
     if (proto->timestamp != (uint16_t)-1) {
@@ -665,10 +731,18 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     ssize_t ret;
     size_t wlen;
     ubond_proto_t* proto = &(pkt->p);
-    int tcp = is_tcp(pkt);
+#ifdef TCP
+    int tcp = use_tcp(pkt);
     int fd = (tcp) ? tun->fd_tcp : tun->fd;
+#endif
+    int fd = tun->fd;
 
     wlen = PKTHDRSIZ(pkt->p) + pkt->p.len;
+    // this is the last chnce of rthe sock stream to say "Oh, we dont need that resend".. so it might pull the packet at this late status_changed
+    if (!sock_stamp(pkt)) {
+        ubond_pkt_release_s(pkt);
+        return 0;
+    }
 
     // old_pkts is a ring buffer of the last N packets.
     // The packets may be still held by the stream.
@@ -683,13 +757,15 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 
     // we should still use this to measure packet loss even if they are UDP packets
     // tun seq incrememts even if we resend
-    if (!tcp) {
-        proto->tun_seq = tun->seq;
-        tun->seq++; // ALL packets are stored in the resend old_pkts buffer, even if
-    } else {
+#ifdef TCP
+    if (tcp) {
         proto->tun_seq = 0;
+    } else
+#endif
+    {
+        proto->tun_seq = tun->seq;
+        tun->seq++;
     }
-    // they fail to send.
 
     //proto->flow_id = tun->flow_id; this is now handled by socks
     proto->sent_loss = tun->loss;
@@ -733,6 +809,7 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
                 UBOND_TAILQ_INSERT_TAIL(&send_buffer, pkt);
                 ubond_rtun_status_down(tun);
             } else {
+                // only auth packets should be here.
                 ubond_pkt_release(pkt);
             }
             return 0;
@@ -762,11 +839,14 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         tun->bytes_since_adjust += wlen + IP4_UDP_OVERHEAD;
 
         pkt->last_sent = now64;
+#ifdef TCP
         if (tcp) {
             if (!ev_is_active(&tun->io_tcp_write)) {
                 ev_io_start(EV_A_ & tun->io_tcp_write);
             }
-        } else {
+        } else
+#endif
+        {
             if (!ev_is_active(&tun->io_write)) {
                 ev_io_start(EV_A_ & tun->io_write);
             }
@@ -822,9 +902,11 @@ ubond_rtun_do_send(ubond_tunnel_t* tun, int timed)
                 if (ev_is_active(&tun->io_write)) {
                     ev_io_stop(EV_A_ & tun->io_write);
                 }
+#ifdef TCP
                 if (ev_is_active(&tun->io_tcp_write)) {
                     ev_io_stop(EV_A_ & tun->io_tcp_write);
                 }
+#endif
             }
         }
 #if 0
@@ -859,6 +941,7 @@ ubond_rtun_do_send(ubond_tunnel_t* tun, int timed)
 static void
 ubond_rtun_write(EV_P_ ev_io* w, int revents)
 {
+    check_watcher(UBOND_RTUN_WRITE);
     ubond_tunnel_t* tun = w->data;
     ubond_pkt_t* pkt = tun->sending;
     if (tun->busy_writing) {
@@ -877,8 +960,10 @@ ubond_rtun_write(EV_P_ ev_io* w, int revents)
     ev_io_stop(EV_A_ & tun->io_write);
     ubond_rtun_do_send(tun, 0);
 }
+#ifdef TCP
 static void ubond_rtun_tcp_write(EV_P_ ev_io* w, int revents)
 {
+    check_watcher(UBOND_RTUN_TCP_WRITE);
     ubond_tunnel_t* tun = w->data;
     ubond_pkt_t* pkt = tun->sending;
     ssize_t ret = 0;
@@ -915,10 +1000,12 @@ static void ubond_rtun_tcp_write(EV_P_ ev_io* w, int revents)
         ubond_rtun_do_send(tun, 0);
     }
 }
+#endif
 
 static void
 ubond_rtun_write_timeout(EV_P_ ev_timer* w, int revents)
 {
+    check_watcher(UBOND_RTUN_WRITE_TIMEOUT);
     ubond_tunnel_t* tun = w->data;
     if (!tun->busy_writing)
         ubond_rtun_do_send(tun, 1);
@@ -927,10 +1014,13 @@ ubond_rtun_write_timeout(EV_P_ ev_timer* w, int revents)
 static void
 ubond_rtun_write_check(EV_P_ ev_check* w, int revents)
 {
+    check_watcher(UBOND_RTUN_WRITE_CHECK);
     ubond_tunnel_t* tun = w->data;
     if (!tun->busy_writing)
         ubond_rtun_do_send(tun, 0);
 }
+
+int num_tuns=0;
 
 ubond_tunnel_t*
 ubond_rtun_new(const char* name,
@@ -962,9 +1052,16 @@ ubond_rtun_new(const char* name,
         fatal(NULL, "calloc failed");
     /* other values are enforced by calloc to 0/NULL */
     new->name = strdup(name);
+    new->num = num_tuns++;
+    if (new->num>=MAX_TUNS) {
+        printf("Can only handle %d tunnels\n", MAX_TUNS);
+        exit(-1);
+    }
     new->fd = -1;
+#ifdef TCP
     new->fd_tcp = -1;
     new->fd_tcp_conn = -1;
+#endif
     new->server_mode = server_mode;
     new->weight = 1;
     new->status = UBOND_DISCONNECTED;
@@ -985,7 +1082,10 @@ ubond_rtun_new(const char* name,
     new->srtt_reductions = 0;
     new->seq_last = 0;
     new->seq_vect = (uint64_t)-1;
+    new->reorder_length = 2;
     new->loss = 0;
+    new->loss_d = 0;
+    new->loss_c = 0;
     new->flow_id = 0;
     if (bandwidth_max == 0) {
         log_warnx("config",
@@ -1017,14 +1117,17 @@ ubond_rtun_new(const char* name,
     new->io_read.data = new;
     new->io_write.data = new;
     new->io_timeout.data = new;
+#ifdef TCP
     new->io_accept.data = new;
     new->io_tcp_read.data = new;
     new->io_tcp_write.data = new;
-    ev_init(&new->io_read, ubond_rtun_read);
-    ev_init(&new->io_write, ubond_rtun_write);
-    ev_init(&new->io_accept, ubond_rtun_accept);
     ev_init(&new->io_tcp_read, ubond_rtun_tcp_read);
     ev_init(&new->io_tcp_write, ubond_rtun_tcp_write);
+    ev_init(&new->io_accept, ubond_rtun_accept);
+#endif
+    ev_init(&new->io_read, ubond_rtun_read);
+    ev_set_priority(&new->io_read, 2);  // read is top priority, because we need to grab the timestamp
+    ev_init(&new->io_write, ubond_rtun_write);
     ev_timer_init(&new->io_timeout, ubond_rtun_check_timeout,
         0., UBOND_IO_TIMEOUT_DEFAULT);
     ev_timer_start(EV_A_ & new->io_timeout);
@@ -1043,7 +1146,9 @@ ubond_rtun_new(const char* name,
     new->bytes_per_sec = 0;
     new->busy_writing = 0;
     new->lossless = 0;
+#ifdef TCP
     new->tcp_fill = NULL;
+#endif
     new->sending = NULL;
     update_process_title();
     return new;
@@ -1278,7 +1383,7 @@ ubond_rtun_start_socket(ubond_tunnel_t* t, int socktype)
                 return -1;
             }
 #endif
-            log_warn(NULL, "%s socket creation success %d", t->name, fd);
+            log_warnx(NULL, "%s socket creation success %d", t->name, fd);
             break;
         }
         res = res->ai_next;
@@ -1309,27 +1414,33 @@ static void socket_close(ubond_tunnel_t* t)
     if (ev_is_active(&t->io_read)) {
         ev_io_stop(EV_A_ & t->io_read);
     }
+    if (t->fd > 0)
+        close(t->fd);
+    t->fd = -1;
+
+#ifdef TCP
     if (ev_is_active(&t->io_accept)) {
         ev_io_stop(EV_A_ & t->io_accept);
     }
     if (ev_is_active(&t->io_tcp_read)) {
         ev_io_stop(EV_A_ & t->io_tcp_read);
     }
-
-    if (t->fd > 0)
-        close(t->fd);
     if (t->fd_tcp > 0)
         close(t->fd_tcp);
     if (t->fd_tcp_conn > 0)
         close(t->fd_tcp_conn);
-    t->fd = -1;
     t->fd_tcp = -1;
     t->fd_tcp_conn = -1;
+#endif
+
     if (t->io_timeout.repeat < UBOND_IO_TIMEOUT_MAXIMUM)
         t->io_timeout.repeat *= UBOND_IO_TIMEOUT_INCREMENT;
 }
+
+#ifdef TCP
 static void ubond_rtun_accept(EV_P_ ev_io* w, int revents)
 {
+    check_watcher(UBOND_RTUN_ACCEPT);
     ubond_tunnel_t* t = w->data;
 
     t->fd_tcp = accept(t->fd_tcp_conn, 0, 0);
@@ -1340,6 +1451,7 @@ static void ubond_rtun_accept(EV_P_ ev_io* w, int revents)
     ev_io_set(&t->io_tcp_write, t->fd_tcp, EV_WRITE);
     //ev_io_start(EV_A_ & t->io_tcp_write);
 }
+#endif
 
 static void
 ubond_rtun_start(ubond_tunnel_t* t)
@@ -1361,6 +1473,7 @@ ubond_rtun_start(ubond_tunnel_t* t)
         t->io_timeout.repeat = UBOND_IO_TIMEOUT_DEFAULT / 2;
     }
 
+#ifdef TCP
     if (t->server_mode) {
         if (t->fd_tcp_conn < 0) {
             if ((t->fd_tcp_conn = ubond_rtun_start_socket(t, SOCK_STREAM)) < 0) {
@@ -1405,6 +1518,7 @@ ubond_rtun_start(ubond_tunnel_t* t)
         ev_io_set(&t->io_tcp_write, t->fd_tcp, EV_WRITE);
         ev_io_start(EV_A_ & t->io_tcp_read);
     }
+#endif
 }
 
 static void
@@ -1496,6 +1610,8 @@ ubond_rtun_status_up(ubond_tunnel_t* t)
     t->srtt_d = 0;
     t->srtt_c = 0;
     t->loss = 0;
+    t->loss_d = 0;
+    t->loss_c = 0;
     t->seq_vect = -1;
     t->bm_data = 0;
     ubond_update_status();
@@ -1530,7 +1646,9 @@ void ubond_rtun_status_down(ubond_tunnel_t* t)
     t->srtt = 0;
     t->srtt_d = 0;
     t->srtt_c = 0;
-    t->loss = 64;
+    t->loss_c = 0;
+    t->loss_d = 0;
+    //t->loss = 64;
     t->saved_timestamp = -1;
     t->saved_timestamp_received_at = 0;
 
@@ -1755,12 +1873,20 @@ static void
 ubond_rtun_tick_connect(ubond_tunnel_t* t)
 {
     if (t->server_mode) {
-        if (t->fd < 0 || t->fd_tcp < 0) {
+        if (t->fd < 0
+#ifdef TCP
+            || t->fd_tcp < 0
+#endif
+        ) {
             ubond_rtun_start(t);
         }
     } else {
         if (t->status < UBOND_AUTHOK) {
-            if (t->fd < 0 || t->fd_tcp < 0) {
+            if (t->fd < 0
+#ifdef TCP
+                || t->fd_tcp < 0
+#endif
+            ) {
                 ubond_rtun_start(t);
             } else {
                 ubond_rtun_challenge_send(t);
@@ -1769,8 +1895,11 @@ ubond_rtun_tick_connect(ubond_tunnel_t* t)
     }
 }
 ev_tstamp last = 0;
+ubond_tunnel_t *fastest=NULL;
+
 void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
 {
+    check_watcher(UBOND_CALC_BANDWIDTH);
     ev_tstamp now = ev_now(EV_A);
     ev_tstamp diff = BANDWIDTHCALCTIME;
     if (last && (now - last) > BANDWIDTHCALCTIME / 2 && (now - last) < BANDWIDTHCALCTIME * 2) {
@@ -1785,7 +1914,7 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
     float max_bw_in = 0;
     float min_bw_in = 0;
 
-    ubond_tunnel_t* t;
+    ubond_tunnel_t *t;
     int tuns = 0;
     LIST_FOREACH(t, &rtuns, entries)
     {
@@ -1810,15 +1939,24 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
             } else {
                 t->srtt = t->srtt_min;
             }
+            if (t->loss_c > 2) {
+                t->loss = ((t->loss * 9) + ((t->loss_d * 100) / t->loss_c))/10;
+            } else {
+                t->loss = 0;
+            }
+            t->loss_d = 0;
+            t->loss_c = 0;
             t->srtt_av = ((t->srtt_av * 9.0) + t->srtt) / 10.0;
 
-            if (!min_srtt || t->srtt_av < min_srtt)
+            if (!min_srtt || t->srtt_av < min_srtt) {
+                fastest=t;
                 min_srtt = t->srtt_av;
+            }
             if (!max_srtt || t->srtt_av > max_srtt)
                 max_srtt = t->srtt_av;
 
             // calc measured bandwidth for INCOMMING
-            t->bandwidth_measured = (t->bm_data / 128) * INVERSEBWCALCTIME; // kbits/sec
+            t->bandwidth_measured = ((double)t->bm_data / 128.0) / diff; // kbits/sec
             t->bm_data = 0;
             if (!min_bw_in || t->bandwidth_measured < min_bw_in)
                 min_bw_in = t->bandwidth_measured;
@@ -1921,7 +2059,7 @@ ubond_rtun_choose(ubond_tunnel_t* rtun)
         return;
 
     ubond_pkt_t* spkt = NULL;
-    if (!UBOND_TAILQ_EMPTY(&hpsend_buffer) && (rtun->sent_loss <= (LOSS_TOLERENCE / 4.0))) {
+    if (!UBOND_TAILQ_EMPTY(&hpsend_buffer) && (!fastest || rtun==fastest)) {// bollox && (rtun->sent_loss <= (LOSS_TOLERENCE / 4.0))) {
         spkt = UBOND_TAILQ_POP_LAST(&hpsend_buffer);
     } else {
         if (!UBOND_TAILQ_EMPTY(&send_buffer)) {
@@ -2046,6 +2184,7 @@ ubond_rtun_check_lossy(ubond_tunnel_t* tun)
 static void
 ubond_rtun_check_timeout(EV_P_ ev_timer* w, int revents)
 {
+    check_watcher(UBOND_RTUN_CHECK_TIMEOUT);
     ubond_tunnel_t* t = w->data;
     ev_tstamp now = ev_now(EV_A);
 
@@ -2067,6 +2206,7 @@ ubond_rtun_check_timeout(EV_P_ ev_timer* w, int revents)
 static void
 tuntap_io_event(EV_P_ ev_io* w, int revents)
 {
+    check_watcher(TUNTAP_IO_EVENT);
     if (revents & EV_READ) {
         ubond_pkt_t* pkt;
         // while?
@@ -2092,6 +2232,7 @@ tuntap_io_event(EV_P_ ev_io* w, int revents)
             }
         }
     } else if (revents & EV_WRITE) {
+#if 0        
         if (!UBOND_TAILQ_EMPTY(&tuntap.sbuf)) {
             ubond_pkt_t* pkt = UBOND_TAILQ_POP_LAST(&tuntap.sbuf);
             ubond_tuntap_write(&tuntap, pkt);
@@ -2100,6 +2241,7 @@ tuntap_io_event(EV_P_ ev_io* w, int revents)
         if (UBOND_TAILQ_EMPTY(&tuntap.sbuf)) {
             ev_io_stop(EV_A_ & tuntap.io_write);
         }
+#endif
     }
 }
 
@@ -2112,9 +2254,9 @@ ubond_tuntap_init()
     tuntap.maxmtu = 1500 - PKTHDRSIZ(proto) - IP4_UDP_OVERHEAD;
     log_debug(NULL, "absolute maximum mtu: %d", tuntap.maxmtu);
     tuntap.type = UBOND_TUNTAPMODE_TUN;
-    ubond_pkt_list_init(&tuntap.sbuf, PKTBUFSIZE);
+//    ubond_pkt_list_init(&tuntap.sbuf, PKTBUFSIZE);
     ev_init(&tuntap.io_read, tuntap_io_event);
-    ev_init(&tuntap.io_write, tuntap_io_event);
+//    ev_init(&tuntap.io_write, tuntap_io_event);
 }
 
 static void
@@ -2155,6 +2297,7 @@ update_process_title()
 static void
 ubond_config_reload(EV_P_ ev_signal* w, int revents)
 {
+    check_watcher(UBOND_CONFIG_RELOAD);
     log_info("config", "reload (SIGHUP)");
     priv_reload_resolver();
     /* configuration file path does not matter after
@@ -2177,6 +2320,7 @@ ubond_config_reload(EV_P_ ev_signal* w, int revents)
 static void
 ubond_quit(EV_P_ ev_signal* w, int revents)
 {
+    check_watcher(UBOND_QUIT);
     ubond_tunnel_t* t;
     log_info(NULL, "killed by signal SIGTERM, SIGQUIT or SIGINT");
     LIST_FOREACH(t, &rtuns, entries)
@@ -2358,6 +2502,7 @@ int main(int argc, char** argv)
         //ubond_pkt_list_init(&send_buffer, i*2);
         ubond_pkt_list_init(&send_buffer, PKTBUFSIZE * 100);
         ubond_pkt_list_init(&hpsend_buffer, PKTBUFSIZE);
+        ubond_pkt_list_init(&incomming, PKTBUFSIZE);        
     }
 
     if (ubond_tuntap_alloc(&tuntap) <= 0)
@@ -2369,7 +2514,7 @@ int main(int argc, char** argv)
     preset_permitted(argc, saved_argv);
 
     ev_io_set(&tuntap.io_read, tuntap.fd, EV_READ);
-    ev_io_set(&tuntap.io_write, tuntap.fd, EV_WRITE);
+    //ev_io_set(&tuntap.io_write, tuntap.fd, EV_WRITE);
     ev_io_start(EV_A_ & tuntap.io_read);
 
     /* tcp socket init */
@@ -2408,6 +2553,14 @@ int main(int argc, char** argv)
     ev_signal_start(EV_A_ & signal_sigint);
     ev_signal_start(EV_A_ & signal_sigquit);
     ev_signal_start(EV_A_ & signal_sigterm);
+
+    ev_idle_init(&read_pkt, ubond_rtun_read_idle);
+    ev_set_priority(&read_pkt, 1); // higher priority that write, so dont get locked out, but allow reads to happen first.
+
+#ifdef PROF_WATCH
+    ev_idle_init(&idle_check_watcher_ev, idle_check_watcher);
+    ev_idle_start(EV_A_ & idle_check_watcher_ev);
+#endif
 
     ev_run(EV_A_ 0);
 

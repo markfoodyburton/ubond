@@ -125,6 +125,7 @@ void deliver()
 }
 void ubond_reorder_tick(EV_P_ ev_timer* w, int revents)
 {
+    check_watcher(UBOND_REORDER_TICK);
     ev_tstamp now = ev_now(EV_DEFAULT_UC);
     if (size() && ((now - reorder_buffer.last_delivery) > REORDER_TIMEOUT)) {
         /* skip */
@@ -223,7 +224,7 @@ void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     } else {
         reorder_buffer.old++;
         ubond_pkt_release(pkt); // we have already got this packet!
-        tun->loss++;
+//        tun->loss++;
 //      setting loss to e.g. 100 is a bit evil, but seems to work !
 
         log_debug("reorder_buffer", "REJECT PACKET 0x%x from %s (current next 0x%x current head 0x%x max size %d", pkt->p.data_seq, tun->name, reorder_buffer.next, reorder_buffer.head, max_size());

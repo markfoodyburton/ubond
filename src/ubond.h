@@ -3,45 +3,44 @@
 
 #include "includes.h"
 
-#include <unistd.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdarg.h>
-#include <sys/queue.h>
-#include <sys/un.h>
+#include <ev.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <time.h>
-#include <math.h>
-#include <ev.h>
-#include <stdlib.h>
+#include <stdarg.h>
 #include <stddef.h>
-
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/queue.h>
+#include <sys/un.h>
+#include <time.h>
+#include <unistd.h>
 
 /* Many thanks Fabien Dupont! */
 #ifdef HAVE_LINUX
- /* Absolutely essential to have it there for IFNAMSIZ */
- #include <sys/types.h>
- #include <netdb.h>
- #include <linux/if.h>
+/* Absolutely essential to have it there for IFNAMSIZ */
+#include <linux/if.h>
+#include <netdb.h>
+#include <sys/types.h>
 #endif
 
 #include <arpa/inet.h>
 
 #ifdef HAVE_VALGRIND_VALGRIND_H
- #include <valgrind/valgrind.h>
+#include <valgrind/valgrind.h>
 #else
- #define RUNNING_ON_VALGRIND 0
+#define RUNNING_ON_VALGRIND 0
 #endif
 
 #ifdef HAVE_DECL_RES_INIT
- #include <netinet/in.h>
- #include <arpa/nameser.h>
- #include <resolv.h>
+#include <arpa/nameser.h>
+#include <netinet/in.h>
+#include <resolv.h>
 #endif
 
 #ifdef HAVE_FILTERS
- #include <pcap/pcap.h>
+#include <pcap/pcap.h>
 #endif
 
 #include "pkt.h"
@@ -57,9 +56,11 @@
 
 /* tuntap interface name size */
 #ifndef IFNAMSIZ
- #define IFNAMSIZ 16
+#define IFNAMSIZ 16
 #endif
 #define UBOND_IFNAMSIZ IFNAMSIZ
+
+#define MAX_TUNS 16 // maximum tunnels we can handle
 
 /* How frequently we check tunnels */
 #define UBOND_IO_TIMEOUT_DEFAULT 0.25
@@ -85,8 +86,7 @@
  */
 #define UBOND_PROTOCOL_VERSION 2
 
-struct ubond_options_s
-{
+struct ubond_options_s {
     /* use ps_status or not ? */
     int change_process_title;
     /* process name if set */
@@ -118,8 +118,7 @@ struct ubond_options_s
     uint32_t tcp_socket;
 };
 
-struct ubond_status_s
-{
+struct ubond_status_s {
     int fallback_mode;
     int connected;
     int initialized;
@@ -134,65 +133,65 @@ enum chap_status {
     UBOND_LOSSY
 };
 
-LIST_HEAD(rtunhead, ubond_tunnel_s) rtuns;
+LIST_HEAD(rtunhead, ubond_tunnel_s)
+rtuns;
 
-typedef struct ubond_tunnel_s
-{
-    LIST_ENTRY(ubond_tunnel_s) entries;
-    char *name;           /* tunnel name */
+typedef struct ubond_tunnel_s {
+    LIST_ENTRY(ubond_tunnel_s)
+    entries;
+    char* name; /* tunnel name */
     char bindaddr[UBOND_MAXHNAMSTR]; /* packets source */
     char bindport[UBOND_MAXPORTSTR]; /* packets port source (or NULL) */
-    char binddev[UBOND_IFNAMSIZ];    /* bind to specific device */
-    uint32_t bindfib;     /* FIB number to use */
+    char binddev[UBOND_IFNAMSIZ]; /* bind to specific device */
+    uint32_t bindfib; /* FIB number to use */
     char destaddr[UBOND_MAXHNAMSTR]; /* remote server ip (can be hostname) */
     char destport[UBOND_MAXPORTSTR]; /* remote server port */
-    uint16_t id;               /* Unique ID which will be shared between tunnel end
+    uint16_t id; /* Unique ID which will be shared between tunnel end
                              points (e.g. port number) */
-    int fd;               /* socket file descriptor */
-    int fd_tcp;
-    int fd_tcp_conn;
+    int fd; /* socket file descriptor */
+    int num; /* tunnel number on this host */
 
-    int server_mode;      /* server or client */
-    int disconnects;      /* is it stable ? */
-    int fallback_only;    /* if set, this link will be used when all others are down */
+    int server_mode; /* server or client */
+    int disconnects; /* is it stable ? */
+    int fallback_only; /* if set, this link will be used when all others are down */
     uint64_t pkts_cnt;
-    uint8_t sent_loss;   /* loss as reported by far end */
-    uint8_t loss;    /* our average loss must be less than 256!*/
+    uint8_t sent_loss; /* loss as reported by far end */
+    int loss; /* our average loss must be less than 256!*/
+    int loss_d;
+    int loss_c;
     uint16_t seq;
     uint64_t saved_timestamp;
     uint64_t saved_timestamp_received_at;
     uint16_t seq_last;
     uint64_t seq_vect;
+    int reorder_length;
     double srtt_av;
-    double srtt;    
+    double srtt;
     double srtt_d;
     double srtt_c;
     double srtt_min;
     double srtt_reductions;
-    double weight;        /* For weight round robin */
+    double weight; /* For weight round robin */
     uint32_t flow_id;
     uint64_t sentpackets; /* 64bit packets sent counter */
     uint64_t recvpackets; /* 64bit packets recv counter */
-    uint64_t sentbytes;   /* 64bit bytes sent counter */
-    uint64_t recvbytes;   /* 64bit bytes recv counter */
-    int64_t permitted;  /* how many bytes we can send */
+    uint64_t sentbytes; /* 64bit bytes sent counter */
+    uint64_t recvbytes; /* 64bit bytes recv counter */
+    int64_t permitted; /* how many bytes we can send */
     uint32_t quota; /* how many bytes per second we can send */
-    uint32_t timeout;     /* configured timeout in seconds */
-    uint64_t bandwidth_max;   /* max bandwidth in bytes per second */
+    uint32_t timeout; /* configured timeout in seconds */
+    uint64_t bandwidth_max; /* max bandwidth in bytes per second */
     //uint64_t bandwidth;   /* current bandwidth in bytes per second */
     uint64_t bandwidth_measured;
     uint64_t bm_data;
     uint64_t bandwidth_out;
-    ubond_pkt_list_t sbuf;    /* send buffer */
-    ubond_pkt_list_t hpsbuf;  /* high priority buffer */
-    struct addrinfo *addrinfo;
-    enum chap_status status;    /* Auth status */
+    ubond_pkt_list_t sbuf; /* send buffer */
+    ubond_pkt_list_t hpsbuf; /* high priority buffer */
+    struct addrinfo* addrinfo;
+    enum chap_status status; /* Auth status */
     ev_tstamp last_activity;
     ev_io io_read;
     ev_io io_write;
-    ev_io io_accept;
-    ev_io io_tcp_read;
-    ev_io io_tcp_write;
     ev_timer io_timeout;
     ev_check check_ev;
     ev_idle idle_ev;
@@ -204,35 +203,43 @@ typedef struct ubond_tunnel_s
     int lossless;
     int busy_writing;
 
-    ubond_pkt_t *tcp_fill;
-    ubond_pkt_t *sending;
+    ubond_pkt_t* sending;
     //ubond_pkt_t *old_pkts[RESENDBUFSIZE];
+
+#ifdef TCP
+    int fd_tcp;
+    int fd_tcp_conn;
+    ev_io io_accept;
+    ev_io io_tcp_read;
+    ev_io io_tcp_write;
+    ubond_pkt_t* tcp_fill;
+#endif
 } ubond_tunnel_t;
 
 #ifdef HAVE_FILTERS
 struct ubond_filters_s {
     uint8_t count;
     struct bpf_program filter[255];
-    ubond_tunnel_t *tun[255];
+    ubond_tunnel_t* tun[255];
 };
 #endif
 
 int ubond_config(int config_file_fd, int first_time);
 int ubond_sock_set_nonblocking(int fd);
 
-int ubond_loss_ratio(ubond_tunnel_t *tun);
-void ubond_rtun_set_weight(ubond_tunnel_t *t, double weight);
+int ubond_loss_ratio(ubond_tunnel_t* tun);
+void ubond_rtun_set_weight(ubond_tunnel_t* t, double weight);
 
-ubond_tunnel_t *ubond_rtun_new(const char *name,
-    const char *bindaddr, const char *bindport, const char *binddev, uint32_t bindfib,
-    const char *destaddr, const char *destport,
+ubond_tunnel_t* ubond_rtun_new(const char* name,
+    const char* bindaddr, const char* bindport, const char* binddev, uint32_t bindfib,
+    const char* destaddr, const char* destport,
     int server_mode, uint32_t timeout,
     int fallback_only, uint32_t bandwidth, uint32_t quota);
-void ubond_rtun_drop(ubond_tunnel_t *t);
-void ubond_rtun_status_down(ubond_tunnel_t *t);
+void ubond_rtun_drop(ubond_tunnel_t* t);
+void ubond_rtun_status_down(ubond_tunnel_t* t);
 #ifdef HAVE_FILTERS
-int ubond_filters_add(const struct bpf_program *filter, ubond_tunnel_t *tun);
-ubond_tunnel_t *ubond_filters_choose(uint32_t pktlen, const u_char *pktdata);
+int ubond_filters_add(const struct bpf_program* filter, ubond_tunnel_t* tun);
+ubond_tunnel_t* ubond_filters_choose(uint32_t pktlen, const u_char* pktdata);
 //void ubond_send_buffer_write(ubond_pkt_t *p);
 #endif
 
@@ -240,8 +247,40 @@ void ubond_buffer_write(ubond_pkt_list_t* buffer, ubond_pkt_t* p);
 int ubond_pkt_list_is_full(ubond_pkt_list_t* list);
 int ubond_pkt_list_is_full_watermark(ubond_pkt_list_t* list);
 
-#include "privsep.h"
+enum checker_id {
+    NO_CHECKER,
+    UBOND_RESET_PERM,
+    UBOND_RTUN_TCP_READ,
+    UBOND_RTUN_READ,
+    UBOND_RTUN_WRITE,
+    UBOND_RTUN_READ_IDLE,
+    UBOND_RTUN_TCP_WRITE,
+    UBOND_RTUN_WRITE_TIMEOUT,
+    UBOND_RTUN_WRITE_CHECK,
+    UBOND_RTUN_ACCEPT,
+    UBOND_CALC_BANDWIDTH,
+    UBOND_RTUN_CHECK_TIMEOUT,
+    TUNTAP_IO_EVENT,
+    UBOND_CONFIG_RELOAD,
+    UBOND_QUIT,
+    UBOND_REORDER_TICK,
+    SOCKS_ON_READ_CB,
+    SOCKS_ON_WRITE_CB,
+    SOCKS_ON_ACCEPT_CB,
+    SOCKS_RESEND_TIMER,
+    MAX_CHECKERS
+};
+#undef PROF_WATCH
+#ifdef PROF_WATCH
+void check_watcher(enum checker_id name);
+#else
+inline void check_watcher(enum checker_id name)
+{
+}
+#endif
+
 #include "log.h"
+#include "privsep.h"
 #include "reorder.h"
 
 #endif

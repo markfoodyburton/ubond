@@ -86,6 +86,8 @@ typedef struct ubond_pkt_t {
     uint64_t last_sent; // in ns.
     int sending;
 
+    struct ubond_tunnel_s *rec_tun;
+
     TAILQ_ENTRY(ubond_pkt_t) entry;
 } ubond_pkt_t;
 
