@@ -87,24 +87,23 @@ ubond_pkt_list_t incomming; /* incoming packet buffer */
 
 ev_idle read_pkt;
 
-
 #ifdef PROF_WATCH
-int last_watcher=NO_CHECKER;
+int last_watcher = NO_CHECKER;
 ev_tstamp last_time;
 ev_idle idle_check_watcher_ev;
 
-ev_tstamp checker_times[MAX_CHECKERS]={0};
+ev_tstamp checker_times[MAX_CHECKERS] = { 0 };
 
 void check_watcher(enum checker_id name)
 {
-    ev_tstamp now=ev_time();
+    ev_tstamp now = ev_time();
     if (last_watcher) {
         if (now - last_time > checker_times[name]) {
             checker_times[name] = now - last_time;
             printf("Worst time for %d - time %f\n", name, checker_times[name]);
         }
     }
-    last_watcher=name;
+    last_watcher = name;
     last_time = now;
 }
 static void idle_check_watcher(EV_P_ ev_idle* w, int revents)
@@ -396,10 +395,11 @@ ubond_loss_update(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         //            ubond_rtun_request_resend(tun, seq - d, d-1);
         //            }
         //        }
-        if (tun->seq_vect == -1 && tun->reorder_length > 3) tun->reorder_length--;
+        if (tun->seq_vect == -1 && tun->reorder_length > 3)
+            tun->reorder_length--;
     } else {
         tun->seq_vect |= 1ull << (-d);
-        tun->reorder_length = (-d > tun->reorder_length)?-d:tun->reorder_length;
+        tun->reorder_length = (-d > tun->reorder_length) ? -d : tun->reorder_length;
     }
 
     // according to RFC 3208 you can target the last two packets being out of order
@@ -407,7 +407,8 @@ ubond_loss_update(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 
     //int64_t v = tun->seq_vect | 0x8000000000000000ULL; // signed int.
     //tun->loss = 64 - count_1s(v >> (tun->reorder_length+1));
-    if ((tun->seq_vect & (0x1ULL << tun->reorder_length+1)) == 0) tun->loss_d++;
+    if ((tun->seq_vect & (0x1ULL << tun->reorder_length + 1)) == 0)
+        tun->loss_d++;
     tun->loss_c++;
     tun->seq_last = seq;
 }
@@ -416,7 +417,7 @@ static void
 ubond_rtun_read_idle(EV_P_ ev_idle* w, int reavents)
 {
     check_watcher(UBOND_RTUN_READ_IDLE);
-    ubond_pkt_t *pkt = UBOND_TAILQ_POP_LAST(&incomming);
+    ubond_pkt_t* pkt = UBOND_TAILQ_POP_LAST(&incomming);
     if (pkt) {
         ubond_rtun_read_pkt(pkt->rec_tun, pkt);
     } else {
@@ -453,11 +454,6 @@ ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     ubond_loss_update(tun, pkt);
     // ubond_update_srtt(tun, pkt); already done.
     //    }
-    tun->pkts_cnt++;
-
-    tun->recvbytes += len;
-    tun->recvpackets += 1;
-    // tun->bm_data += pkt->len; already done
     if (tun->quota) {
         if (tun->permitted > (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD)) {
             tun->permitted -= (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD);
@@ -636,7 +632,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int reavents)
     struct sockaddr_storage clientaddr;
     socklen_t addrlen = sizeof(clientaddr);
     ssize_t len;
-//    do {
+    //    do {
     ubond_pkt_t* pkt = ubond_pkt_get();
 
     len = recvfrom(tun->fd, &(pkt->p),
@@ -659,6 +655,9 @@ ubond_rtun_read(EV_P_ ev_io* w, int reavents)
     betoh_proto(&(pkt->p));
 
     pkt->len = len; // stamp the wire length
+    tun->pkts_cnt++;
+    tun->recvbytes += len;
+    tun->recvpackets += 1;
     tun->bm_data += len;
 
     if (!tun->addrinfo)
@@ -693,10 +692,10 @@ ubond_rtun_read(EV_P_ ev_io* w, int reavents)
     UBOND_TAILQ_INSERT_HEAD(&incomming, pkt);
 
     if (!ev_is_active(&read_pkt)) {
-        ev_idle_start(EV_A_ &read_pkt);
+        ev_idle_start(EV_A_ & read_pkt);
     }
-//    } while(1);
-//    ubond_rtun_read_pkt(tun, pkt);
+    //    } while(1);
+    //    ubond_rtun_read_pkt(tun, pkt);
 }
 
 static void
@@ -715,10 +714,12 @@ ubond_update_srtt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     if (proto->timestamp_reply != (uint16_t)-1) {
         uint16_t now16 = ubond_timestamp16(now64);
         uint16_t R = ubond_timestamp16_diff(now16, proto->timestamp_reply);
-        if (R < 5000) { /* ignore large values, or
+        if ((int)(pkt->p.tun_seq - tun->seq_last) > 0) { // if this is an out of order packet, dont count it
+            if (R < 5000) { /* ignore large values, or
                                 * reordered packets */
-            tun->srtt_d += R;
-            tun->srtt_c++;
+                tun->srtt_d += R;
+                tun->srtt_c++;
+            }
         }
         //        log_debug("rtt", "%ums srtt %ums loss ratio: %d",
         //            (unsigned int)R, (unsigned int)R, ubond_loss_ratio(tun));
@@ -1020,7 +1021,7 @@ ubond_rtun_write_check(EV_P_ ev_check* w, int revents)
         ubond_rtun_do_send(tun, 0);
 }
 
-int num_tuns=0;
+int num_tuns = 0;
 
 ubond_tunnel_t*
 ubond_rtun_new(const char* name,
@@ -1053,7 +1054,7 @@ ubond_rtun_new(const char* name,
     /* other values are enforced by calloc to 0/NULL */
     new->name = strdup(name);
     new->num = num_tuns++;
-    if (new->num>=MAX_TUNS) {
+    if (new->num >= MAX_TUNS) {
         printf("Can only handle %d tunnels\n", MAX_TUNS);
         exit(-1);
     }
@@ -1126,7 +1127,7 @@ ubond_rtun_new(const char* name,
     ev_init(&new->io_accept, ubond_rtun_accept);
 #endif
     ev_init(&new->io_read, ubond_rtun_read);
-    ev_set_priority(&new->io_read, 2);  // read is top priority, because we need to grab the timestamp
+    ev_set_priority(&new->io_read, 2); // read is top priority, because we need to grab the timestamp
     ev_init(&new->io_write, ubond_rtun_write);
     ev_timer_init(&new->io_timeout, ubond_rtun_check_timeout,
         0., UBOND_IO_TIMEOUT_DEFAULT);
@@ -1895,7 +1896,7 @@ ubond_rtun_tick_connect(ubond_tunnel_t* t)
     }
 }
 ev_tstamp last = 0;
-ubond_tunnel_t *fastest=NULL;
+ubond_tunnel_t* fastest = NULL;
 
 void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
 {
@@ -1914,7 +1915,7 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
     float max_bw_in = 0;
     float min_bw_in = 0;
 
-    ubond_tunnel_t *t;
+    ubond_tunnel_t* t;
     int tuns = 0;
     LIST_FOREACH(t, &rtuns, entries)
     {
@@ -1940,7 +1941,7 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
                 t->srtt = t->srtt_min;
             }
             if (t->loss_c > 2) {
-                t->loss = ((t->loss * 9) + ((t->loss_d * 100) / t->loss_c))/10;
+                t->loss = ((t->loss * 9) + ((t->loss_d * 100) / t->loss_c)) / 10;
             } else {
                 t->loss = 0;
             }
@@ -1949,7 +1950,7 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
             t->srtt_av = ((t->srtt_av * 9.0) + t->srtt) / 10.0;
 
             if (!min_srtt || t->srtt_av < min_srtt) {
-                fastest=t;
+                fastest = t;
                 min_srtt = t->srtt_av;
             }
             if (!max_srtt || t->srtt_av > max_srtt)
@@ -2059,7 +2060,7 @@ ubond_rtun_choose(ubond_tunnel_t* rtun)
         return;
 
     ubond_pkt_t* spkt = NULL;
-    if (!UBOND_TAILQ_EMPTY(&hpsend_buffer) && (!fastest || rtun==fastest)) {// bollox && (rtun->sent_loss <= (LOSS_TOLERENCE / 4.0))) {
+    if (!UBOND_TAILQ_EMPTY(&hpsend_buffer) && (!fastest || rtun == fastest)) {
         spkt = UBOND_TAILQ_POP_LAST(&hpsend_buffer);
     } else {
         if (!UBOND_TAILQ_EMPTY(&send_buffer)) {
@@ -2254,9 +2255,9 @@ ubond_tuntap_init()
     tuntap.maxmtu = 1500 - PKTHDRSIZ(proto) - IP4_UDP_OVERHEAD;
     log_debug(NULL, "absolute maximum mtu: %d", tuntap.maxmtu);
     tuntap.type = UBOND_TUNTAPMODE_TUN;
-//    ubond_pkt_list_init(&tuntap.sbuf, PKTBUFSIZE);
+    //    ubond_pkt_list_init(&tuntap.sbuf, PKTBUFSIZE);
     ev_init(&tuntap.io_read, tuntap_io_event);
-//    ev_init(&tuntap.io_write, tuntap_io_event);
+    //    ev_init(&tuntap.io_write, tuntap_io_event);
 }
 
 static void
@@ -2502,7 +2503,7 @@ int main(int argc, char** argv)
         //ubond_pkt_list_init(&send_buffer, i*2);
         ubond_pkt_list_init(&send_buffer, PKTBUFSIZE * 100);
         ubond_pkt_list_init(&hpsend_buffer, PKTBUFSIZE);
-        ubond_pkt_list_init(&incomming, PKTBUFSIZE);        
+        ubond_pkt_list_init(&incomming, PKTBUFSIZE);
     }
 
     if (ubond_tuntap_alloc(&tuntap) <= 0)

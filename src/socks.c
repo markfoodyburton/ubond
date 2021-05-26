@@ -46,15 +46,6 @@ extern float max_size_outoforder;
 extern float srtt_max;
 extern struct ev_loop* loop;
 
-ev_tstamp fullrtt()
-{
-    if (srtt_max) {
-        return srtt_max / 250.0;
-    } else {
-        return 0.25;
-    }
-}
-
 static int setnonblock(int fd);
 
 ev_io socks_read;
@@ -96,7 +87,7 @@ stream_t* ubond_stream_get(int fd)
     UBOND_TAILQ_INIT(&p->draining);
 
     p->resend_timer.data = p;
-    ev_timer_init(&p->resend_timer, &resend_timer, 0., 0.01);
+    ev_timer_init(&p->resend_timer, &resend_timer, 0., 0.1);
     memset(p->tuns, 0, sizeof(p->tuns));
 
     p->open = 1;
@@ -308,7 +299,7 @@ static void resend(stream_t* s)
     int i = 0;
     uint64_t now64 = ubond_timestamp64(ev_now(EV_A));
     ubond_v_pkt_t* l;
-    uint64_t fullrtt64 = fullrtt() * 1000; // convert to ms
+    uint64_t rtt64 = srtt_max?srtt_max : 50;
 
     if (s->sent.length > (max_size_outoforder * 2)) {
         UBOND_TAILQ_FOREACH(l, &s->sent)
@@ -319,8 +310,8 @@ static void resend(stream_t* s)
                 log_warnx("tcp", "HPSend buffer is full for resend!");
                 break;
             }
-            log_debug("tcp", "sending %d last %u full %u now %u = %ld", l->pkt->sending, l->pkt->last_sent, fullrtt64, now64, (int64_t)(l->pkt->last_sent + fullrtt64 - now64));
-            if (!l->pkt->sending && (now64 - l->pkt->last_sent > fullrtt64)) {
+            log_debug("tcp", "sending %d last %u full %u now %u = %ld", l->pkt->sending, l->pkt->last_sent, rtt64, now64, (int64_t)(l->pkt->last_sent + rtt64 - now64));
+            if (!l->pkt->sending && (now64 - l->pkt->last_sent > (rtt64*2))) {
                 l->pkt->last_sent = now64;
                 log_debug("tcp", "Resend as we have no ack %d package in sent list", l->pkt->p.data_seq);
                 // should check we're not already sending it (slowly?)
@@ -370,7 +361,8 @@ static void resend_timer(EV_P_ ev_timer* w, int revents)
     if (s->sent.length == 0) {
         ev_timer_stop(EV_A_ & s->resend_timer);
     }
-    s->resend_timer.repeat = fullrtt();
+
+    //s->resend_timer.repeat = fullrtt();
     //    log_warnx("tcp", "full rtt %f", fullrtt());
     resend(s);
 }
