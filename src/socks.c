@@ -311,7 +311,7 @@ static void resend(stream_t* s)
                 break;
             }
             log_debug("tcp", "sending %d last %u full %u now %u = %ld", l->pkt->sending, l->pkt->last_sent, rtt64, now64, (int64_t)(l->pkt->last_sent + rtt64 - now64));
-            if (!l->pkt->sending && (now64 - l->pkt->last_sent > (rtt64*2))) {
+            if (!l->pkt->sending && (now64 - l->pkt->last_sent > (rtt64*3))) {
                 l->pkt->last_sent = now64;
                 log_debug("tcp", "Resend as we have no ack %d package in sent list", l->pkt->p.data_seq);
                 // should check we're not already sending it (slowly?)

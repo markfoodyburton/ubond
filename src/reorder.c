@@ -43,7 +43,7 @@
 #include "socks.h"
 #include "ubond.h"
 
-#define MAX_REORDERBUF ((uint32_t)0x2000)
+#define MAX_REORDERBUF ((uint32_t)10240)
 #define MIN_REORDERBUF ((uint32_t)0x20)
 
 #define REORDER_TIMEOUT 0.1

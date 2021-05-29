@@ -193,8 +193,10 @@ static void ubond_rtun_write_check(EV_P_ ev_check* w, int revents);
 static void ubond_rtun_send_keepalive(ev_tstamp now, ubond_tunnel_t* t);
 static void ubond_rtun_send_disconnect(ubond_tunnel_t* t);
 static int ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt);
-//static void ubond_rtun_resend(struct resend_data* d);
-//static void ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint16_t tun_seqn, uint16_t len);
+#ifdef RESEND
+static void ubond_rtun_resend(struct resend_data* d);
+static void ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint16_t tun_seqn, uint16_t len);
+#endif
 static void ubond_rtun_send_auth_ok(ubond_tunnel_t* t);
 static void ubond_rtun_tuntap_up();
 static void ubond_rtun_status_up(ubond_tunnel_t* t);
@@ -389,12 +391,15 @@ ubond_loss_update(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     if (d > 0) {
         tun->seq_vect <<= d;
         tun->seq_vect |= 1ull;
+#if RESEND
+        if (d>2) {//(tun->seq_vect & (0x1ULL << tun->reorder_length + 1)) == 0) {
         //        if ((tun->seq_vect & (1ull<<3))==0) // if this isn't set, we suspect a loss.
         //        {
         //            if (d>=3) {
-        //            ubond_rtun_request_resend(tun, seq - d, d-1);
+                    ubond_rtun_request_resend(tun, seq - d, d-1);
         //            }
-        //        }
+                }
+#endif
         if (tun->seq_vect == -1 && tun->reorder_length > 3)
             tun->reorder_length--;
     } else {
@@ -407,8 +412,9 @@ ubond_loss_update(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 
     //int64_t v = tun->seq_vect | 0x8000000000000000ULL; // signed int.
     //tun->loss = 64 - count_1s(v >> (tun->reorder_length+1));
-    if ((tun->seq_vect & (0x1ULL << tun->reorder_length + 1)) == 0)
+    if ((tun->seq_vect & (0x1ULL << tun->reorder_length + 1)) == 0) {
         tun->loss_d++;
+    }
     tun->loss_c++;
     tun->seq_last = seq;
 }
@@ -488,10 +494,12 @@ ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
             ubond_rtun_status_down(tun);
             ubond_pkt_release(pkt);
             break;
+#ifdef RESEND            
         case UBOND_PKT_RESEND:
-            //                ubond_rtun_resend((struct resend_data*)pkt->p.data);
+            ubond_rtun_resend((struct resend_data*)pkt->p.data);
             ubond_pkt_release(pkt);
             break;
+#endif
         case UBOND_PKT_TCP_OPEN:
             ubond_socks_init(pkt);
             ubond_pkt_release(pkt);
@@ -745,17 +753,6 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         return 0;
     }
 
-    // old_pkts is a ring buffer of the last N packets.
-    // The packets may be still held by the stream.
-    //    if (tun->old_pkts[tun->seq % RESENDBUFSIZE]) {
-    //        tun->old_pkts[tun->seq % RESENDBUFSIZE]->sent_tun = NULL; // remove from this tun
-    //        if (!tun->old_pkts[tun->seq % RESENDBUFSIZE]->stream) {
-    //            ubond_pkt_release(tun->old_pkts[tun->seq % RESENDBUFSIZE]);
-    //        }
-    //    }
-    //    tun->old_pkts[tun->seq % RESENDBUFSIZE] = pkt;
-    //pkt->sent_tun = tun;
-
     // we should still use this to measure packet loss even if they are UDP packets
     // tun seq incrememts even if we resend
 #ifdef TCP
@@ -852,6 +849,17 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
                 ev_io_start(EV_A_ & tun->io_write);
             }
         }
+
+#ifdef RESEND
+    // old_pkts is a ring buffer of the last N packets.
+    // The packets may be still held by the stream.
+    if (tun->old_pkts[tun->seq % RESENDBUFSIZE]) {
+        ubond_pkt_release_s(tun->old_pkts[tun->seq % RESENDBUFSIZE]);
+    }
+    pkt->usecnt++;
+    tun->old_pkts[tun->seq % RESENDBUFSIZE] = pkt;
+#endif    
+    //pkt->sent_tun = tun;
 
         // stream will handle memory
         //        if (pkt->stream) {
@@ -1790,7 +1798,7 @@ ubond_rtun_send_auth_ok(ubond_tunnel_t* t)
     log_info("protocol", "%s sending authenticate OK", t->name);
 }
 
-#if 0
+#ifdef RESEND
 static void
 ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint16_t tun_seqn, uint16_t len)
 {
@@ -1815,9 +1823,7 @@ ubond_rtun_request_resend(ubond_tunnel_t* loss_tun, uint16_t tun_seqn, uint16_t 
 
     log_debug("resend", "Request resend 0x%x (lost from tunnel %s)", /* t->name,*/ tun_seqn, loss_tun->name);
 }
-#endif
 
-#if 0
 static ubond_tunnel_t* ubond_find_tun(uint16_t id)
 {
     ubond_tunnel_t* t;
@@ -1828,8 +1834,7 @@ static ubond_tunnel_t* ubond_find_tun(uint16_t id)
     }
     return NULL;
 }
-#endif
-#if 0
+
 static void
 ubond_rtun_resend(struct resend_data* d)
 {

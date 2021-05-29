@@ -52,7 +52,7 @@
 /* Number of packets in the queue. Each pkt is ~ 1520 */
 /* 1520 * 128 ~= 24 KBytes of data maximum per channel VMSize */
 #define PKTBUFSIZE 1024
-#define RESENDBUFSIZE 1024
+#define RESENDBUFSIZE 10240
 
 /* tuntap interface name size */
 #ifndef IFNAMSIZ
@@ -204,7 +204,9 @@ typedef struct ubond_tunnel_s {
     int busy_writing;
 
     ubond_pkt_t* sending;
-    //ubond_pkt_t *old_pkts[RESENDBUFSIZE];
+#ifdef RESEND
+    ubond_pkt_t *old_pkts[RESENDBUFSIZE];
+#endif
 
 #ifdef TCP
     int fd_tcp;
