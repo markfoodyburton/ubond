@@ -6,7 +6,8 @@
 #include <ev.h>
 #include <math.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
+//#include <netinet/tcp.h>
+#include <linux/tcp.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -19,6 +20,9 @@
 
 /* Many thanks Fabien Dupont! */
 #ifdef HAVE_LINUX
+
+#define  TCP
+
 /* Absolutely essential to have it there for IFNAMSIZ */
 #include <linux/if.h>
 #include <netdb.h>
@@ -133,9 +137,6 @@ enum chap_status {
     UBOND_LOSSY
 };
 
-LIST_HEAD(rtunhead, ubond_tunnel_s)
-rtuns;
-
 typedef struct ubond_tunnel_s {
     LIST_ENTRY(ubond_tunnel_s)
     entries;
@@ -204,6 +205,7 @@ typedef struct ubond_tunnel_s {
     int busy_writing;
 
     ubond_pkt_t* sending;
+    ubond_pkt_t* sending_tcp;    
 #ifdef RESEND
     ubond_pkt_t *old_pkts[RESENDBUFSIZE];
 #endif
@@ -215,6 +217,9 @@ typedef struct ubond_tunnel_s {
     ev_io io_tcp_read;
     ev_io io_tcp_write;
     ubond_pkt_t* tcp_fill;
+    ev_check tcp_r_check_ev;
+    ev_check tcp_w_check_ev;    
+    int tcp_authenticated;
 #endif
 } ubond_tunnel_t;
 
@@ -266,10 +271,11 @@ enum checker_id {
     UBOND_CONFIG_RELOAD,
     UBOND_QUIT,
     UBOND_REORDER_TICK,
-    SOCKS_ON_READ_CB,
-    SOCKS_ON_WRITE_CB,
-    SOCKS_ON_ACCEPT_CB,
-    SOCKS_RESEND_TIMER,
+//    SOCKS_ON_READ_CB,
+//    SOCKS_ON_WRITE_CB,
+//    SOCKS_ON_ACCEPT_CB,
+//    SOCKS_RESEND_TIMER,
+    UBOND_TCP_RW_IDLE_CHECK,
     MAX_CHECKERS
 };
 #undef PROF_WATCH

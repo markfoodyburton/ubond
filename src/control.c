@@ -35,6 +35,7 @@ void ubond_control_write_status(struct ubond_control *ctrl);
 extern int ubond_reorder_length();
 extern double ubond_total_loss();
 extern uint64_t pool_out;
+extern LIST_HEAD(rtunhead, ubond_tunnel_s) rtuns;
 
 #define HTTP_HEADERS "HTTP/1.1 200 OK\r\n" \
     "Connection: close\r\n" \

@@ -35,6 +35,7 @@ extern char* status_command;
 extern struct ubond_options_s ubond_options;
 extern struct ubond_filters_s ubond_filters;
 extern struct tuntap_s tuntap;
+extern LIST_HEAD(rtunhead, ubond_tunnel_s) rtuns;
 
 char* ip_from_if(char* ifname);
 // we'll declair this here, so that any device name used instead of an IP

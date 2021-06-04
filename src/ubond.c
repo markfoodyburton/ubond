@@ -39,7 +39,7 @@
 #include <ev.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
+//#include <netinet/tcp.h>
 #include <sys/select.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -60,6 +60,19 @@
 #include "systemd.h"
 #include <sys/prctl.h>
 #endif
+
+#define MPTCP
+
+/*
+things to do
+1/ split out the mptcp connection so its not in the other tunnels
+        make it so the up/down is independent
+DONE 2/ Add some sort of initial 'password' check
+DONE 3/ remove the socks stuff
+4/ re-instate the non-mptcp tcp path, as a fallback?
+DONE 5/ remove the package header and use the IP header for tcp packages
+6/ make auto bandwidth optional
+*/
 
 /* GLOBALS */
 struct tuntap_s tuntap;
@@ -84,6 +97,10 @@ static ev_timer bandwidth_calc_timer;
 ubond_pkt_list_t send_buffer; /* send buffer */
 ubond_pkt_list_t hpsend_buffer; /* send buffer */
 ubond_pkt_list_t incomming; /* incoming packet buffer */
+ubond_pkt_list_t mptcp_buffer;
+
+LIST_HEAD(rtunhead, ubond_tunnel_s)
+rtuns;
 
 ev_idle read_pkt;
 
@@ -93,9 +110,11 @@ ev_tstamp last_time;
 ev_idle idle_check_watcher_ev;
 
 ev_tstamp checker_times[MAX_CHECKERS] = { 0 };
+uint64_t checker_xtimes[MAX_CHECKERS] = { 0 };
 
 void check_watcher(enum checker_id name)
 {
+    checker_xtimes[name]++;
     ev_tstamp now = ev_time();
     if (last_watcher) {
         if (now - last_time > checker_times[name]) {
@@ -109,6 +128,12 @@ void check_watcher(enum checker_id name)
 static void idle_check_watcher(EV_P_ ev_idle* w, int revents)
 {
     check_watcher(NO_CHECKER);
+}
+static void print_checkers()
+{
+    for (int i = 0; i < MAX_CHECKERS; i++) {
+        printf("%d %d\n", i, checker_xtimes[i]);
+    }
 }
 #endif
 
@@ -186,6 +211,7 @@ static void ubond_rtun_write(EV_P_ ev_io* w, int revents);
 static void ubond_rtun_accept(EV_P_ ev_io* w, int revents);
 static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents);
 static void ubond_rtun_tcp_write(EV_P_ ev_io* w, int revents);
+static int ubond_mptcp_check_auth(ubond_tunnel_t* tun, ubond_pkt_t* pkt);
 #endif
 static void ubond_rtun_write_timeout(EV_P_ ev_timer* w, int revents);
 static void ubond_rtun_check_timeout(EV_P_ ev_timer* w, int revents);
@@ -234,25 +260,14 @@ usage(char** argv)
     exit(2);
 }
 
-int is_tcp(ubond_pkt_t* pkt)
+#ifdef TCP
+int use_tcp(ubond_pkt_t* pkt)
 {
-    // should packet inspect, and only re-order TCP packets !
-    // 17 - UDP
-    // 6 - TCP
-    if (pkt->p.type == UBOND_PKT_TCP_OPEN
-        || pkt->p.type == UBOND_PKT_TCP_CLOSE
-        || pkt->p.type == UBOND_PKT_TCP_DATA
-        || pkt->p.type == UBOND_PKT_TCP_ACK
-        || ((pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND) && pkt->p.data[9] == 6)) {
+    if (((pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND) && pkt->p.data[9] == 6)) {
         return 1;
     } else {
         return 0;
     }
-}
-#ifdef TCP
-int use_tcp(ubond_pkt_t* pkt)
-{
-    return is_tcp();
 }
 #endif
 
@@ -392,13 +407,13 @@ ubond_loss_update(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         tun->seq_vect <<= d;
         tun->seq_vect |= 1ull;
 #if RESEND
-        if (d>2) {//(tun->seq_vect & (0x1ULL << tun->reorder_length + 1)) == 0) {
-        //        if ((tun->seq_vect & (1ull<<3))==0) // if this isn't set, we suspect a loss.
-        //        {
-        //            if (d>=3) {
-                    ubond_rtun_request_resend(tun, seq - d, d-1);
-        //            }
-                }
+        if (d > 2) { //(tun->seq_vect & (0x1ULL << tun->reorder_length + 1)) == 0) {
+            //        if ((tun->seq_vect & (1ull<<3))==0) // if this isn't set, we suspect a loss.
+            //        {
+            //            if (d>=3) {
+            ubond_rtun_request_resend(tun, seq - d, d - 1);
+            //            }
+        }
 #endif
         if (tun->seq_vect == -1 && tun->reorder_length > 3)
             tun->reorder_length--;
@@ -455,11 +470,12 @@ ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         return;
     }
 
-    //    if (!is_tcp(pkt)) {
     /* validate the received packet */
-    ubond_loss_update(tun, pkt);
-    // ubond_update_srtt(tun, pkt); already done.
-    //    }
+#if defined(TCP) && !defined(MPTCP)
+    if (!use_tcp(pkt))
+#endif
+        ubond_loss_update(tun, pkt);
+
     if (tun->quota) {
         if (tun->permitted > (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD)) {
             tun->permitted -= (len + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD);
@@ -494,13 +510,13 @@ ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
             ubond_rtun_status_down(tun);
             ubond_pkt_release(pkt);
             break;
-#ifdef RESEND            
+#ifdef RESEND
         case UBOND_PKT_RESEND:
             ubond_rtun_resend((struct resend_data*)pkt->p.data);
             ubond_pkt_release(pkt);
             break;
 #endif
-        case UBOND_PKT_TCP_OPEN:
+            /*        case UBOND_PKT_TCP_OPEN:
             ubond_socks_init(pkt);
             ubond_pkt_release(pkt);
             break;
@@ -509,7 +525,7 @@ ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         case UBOND_PKT_TCP_ACK:
             ubond_stream_write(pkt, tun);
             break;
-
+*/
         case UBOND_PKT_AUTH_OK:
         case UBOND_PKT_AUTH:
             if (pkt->p.type == UBOND_PKT_AUTH_OK) {
@@ -560,7 +576,7 @@ ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     }
     //    } while (1);
 }
-
+#define IP4PKTMINSIZE 20
 #ifdef TCP
 /* TCP read */
 static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents)
@@ -571,19 +587,23 @@ static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents)
     struct sockaddr_storage clientaddr;
     socklen_t addrlen = sizeof(clientaddr);
     do {
-        //    printf("READ tcp %s\n", tun->name);
+        //            printf("READ tcp %s\n", tun->name);
         if (tun->tcp_fill == NULL) {
             tun->tcp_fill = ubond_pkt_get();
             tun->tcp_fill->len = 0;
+            tun->tcp_fill->p.len = IP4PKTMINSIZE; // min size
+            tun->tcp_fill->p.type = UBOND_PKT_DATA;
         }
         ubond_pkt_t* pkt = tun->tcp_fill;
-        char* tcp_data = (char*)&(pkt->p);
+        char* tcp_data = (char*)&(pkt->p.data);
 
-        if (pkt->len < PKTHDRSIZ(pkt->p)) {
+        if (pkt->len < IP4PKTMINSIZE) {
             ssize_t len = recvfrom(tun->fd_tcp, &(tcp_data[pkt->len]),
-                PKTHDRSIZ(pkt->p) - pkt->len,
+                IP4PKTMINSIZE - pkt->len,
                 MSG_DONTWAIT, (struct sockaddr*)&clientaddr, &addrlen);
-            if (len < 0) {
+            // No need to check each time the address as somebody can't 'hijack' this stream connection
+            // needs to be done once after the accept
+            if (len <= 0) {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                     log_warn("net", "%s tcp read error", tun->name);
                     ubond_rtun_status_down(tun);
@@ -595,17 +615,17 @@ static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents)
             if (len > 0) {
                 pkt->len += len;
             }
-            if (pkt->len >= PKTHDRSIZ(pkt->p)) {
-                betoh_proto(&(pkt->p));
+            if (pkt->len >= IP4PKTMINSIZE) {
+                pkt->p.len = htobe16(*(uint16_t*)(&pkt->p.data[2]));
             }
         }
-        if (pkt->len >= PKTHDRSIZ(pkt->p)) {
-            ssize_t to_read = PKTHDRSIZ(pkt->p) + pkt->p.len - pkt->len;
+        if (pkt->len >= IP4PKTMINSIZE) {
+            ssize_t to_read = pkt->p.len - pkt->len;
             ssize_t len = (to_read) ? recvfrom(tun->fd_tcp, &(tcp_data[pkt->len]),
                                           to_read,
                                           MSG_DONTWAIT, (struct sockaddr*)&clientaddr, &addrlen)
                                     : 0;
-            if (len < 0) {
+            if (len <= 0) {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                     log_warn("net", "%s tcp read error", tun->name);
                     ubond_rtun_status_down(tun);
@@ -618,13 +638,34 @@ static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents)
                 pkt->len += len;
             }
         }
-        if (pkt->len >= PKTHDRSIZ(pkt->p) && pkt->len > PKTHDRSIZ(pkt->p) + pkt->p.len) {
+        if (pkt->len >= IP4PKTMINSIZE && pkt->len > pkt->p.len) {
             fatalx("Packet length too large?");
         }
-        if (pkt->len >= PKTHDRSIZ(pkt->p) && pkt->len == PKTHDRSIZ(pkt->p) + pkt->p.len) {
-            ubond_rtun_read_pkt(tun, pkt);
+        if (pkt->len >= IP4PKTMINSIZE) {
+            if (!use_tcp(pkt)) {
+                log_warnx("tcp", "Corrupt packet pkt type : %d", pkt->p.data[9]);
+                ubond_rtun_status_down(tun);
+                ubond_pkt_release(pkt);
+                tun->tcp_fill = NULL;
+                return;
+            }
+        }
+        if (pkt->len == pkt->p.len) {
+            log_debug("tcp", "< %s recieved from mptcp %ld bytes (fd:%d)",
+                tun->name, pkt->len, tun->fd_tcp);
+            if (ubond_mptcp_check_auth(tun, pkt)) {
+                ubond_rtun_inject_tuntap(pkt);
+            } else {
+                ubond_pkt_release(pkt);
+            }
+            //            ubond_rtun_read_pkt(tun, pkt);
             tun->tcp_fill = NULL;
+            if (ev_is_active(&tun->tcp_r_check_ev))
+                ev_check_stop(EV_A_ & tun->tcp_r_check_ev);
         } else {
+            log_debug("tcp", "Need more %d", pkt->p.len - pkt->len);
+            if (!ev_is_active(&tun->tcp_r_check_ev))
+                ev_check_start(EV_A_ & tun->tcp_r_check_ev);
             break;
         }
     } while (0);
@@ -734,28 +775,115 @@ ubond_update_srtt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     }
 }
 
+static void ubond_tcp_r_check(EV_P_ ev_check* w, int revents)
+{
+    check_watcher(UBOND_TCP_RW_IDLE_CHECK);
+    ubond_tunnel_t* tun = w->data;
+    ev_invoke(EV_A_ & tun->io_tcp_read, revents);
+}
+static void ubond_tcp_w_check(EV_P_ ev_check* w, int revents)
+{
+    check_watcher(UBOND_TCP_RW_IDLE_CHECK);
+    ubond_tunnel_t* tun = w->data;
+    ev_invoke(EV_A_ & tun->io_tcp_write, revents);
+}
+
+static int ubond_mptcp_rtun_send()
+{
+    ubond_tunnel_t* tun = LIST_FIRST(&rtuns);
+    if (!tun || tun->fd_tcp <= 0)
+        return 0;
+    if (tun->sending_tcp)
+        return 0;
+
+    if (!ubond_pkt_list_is_full(&mptcp_buffer)) {
+        if (!ev_is_active(&tuntap.io_read)) {
+            //            log_warnx(NULL, "starting io_read");
+            ev_io_start(EV_A_ & tuntap.io_read);
+        }
+    }
+    ubond_pkt_t* pkt = UBOND_TAILQ_POP_LAST(&mptcp_buffer);
+    if (!pkt) {
+        if (ev_is_active(&tun->io_tcp_write)) {
+            //            log_warnx("tcp", "no more writes");
+            ev_io_stop(EV_A_ & tun->io_tcp_write);
+        }
+        return 0;
+    }
+    pkt->p.tun_seq = 0;
+    pkt->p.timestamp = 0;
+    //    pkt->stream = 0;
+    size_t wlen = pkt->p.len;
+    pkt->len = wlen;
+    pkt->sent = 0;
+#if 0
+    int fd = tun->fd_tcp;
+//    uint64_t now64 = ubond_timestamp64(ev_now(EV_A));
+    htobe_proto(&pkt->p);
+    ssize_t ret = sendto(fd, &pkt->p, wlen, MSG_DONTWAIT,
+        tun->addrinfo->ai_addr, tun->addrinfo->ai_addrlen);
+    betoh_proto(&pkt->p);
+    if (ret < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            log_warn("tcp", "%s write error FD %d", tun->name, fd);
+            UBOND_TAILQ_INSERT_TAIL(&mptcp_buffer, pkt);
+            ubond_rtun_status_down(tun);
+            return 0;
+        } else {
+            // we should never attempt a send on a blockable tunnel, so we should
+            // nevr get here...
+            log_warnx("net", "mptcp delayed write!", tun->name);
+            //            ubond_rtun_status_down(tun);
+            ret = 0; // like we haven't managed to send anything yet.
+        }
+    }
+    //{
+        pkt->sent += ret;
+#endif
+    tun->sending_tcp = pkt;
+    //tun->sentbytes += wlen; // To make accounting simpler, we'll pretend we have sent everything
+    //if (tun->quota) {
+    //    if (tun->permitted > (wlen + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD)) {
+    //        tun->permitted -= (wlen + PKTHDRSIZ(pkt->p) + IP4_UDP_OVERHEAD);
+    //    } else {
+    //        tun->permitted = 0;
+    //    }
+    //}
+    //tun->bytes_since_adjust += wlen + IP4_UDP_OVERHEAD;
+
+    if (!ev_is_active(&tun->io_tcp_write)) {
+        //            log_warnx("tcp", "starting writes");
+        ev_io_start(EV_A_ & tun->io_tcp_write);
+    }
+    //    }
+    //    log_debug("tcp", "> %s sending via mptcp %ld/%ld bytes (size=%d, type=%d, fd:%d)",
+    //        tun->name, ret, wlen, pkt->p.len, pkt->p.type, fd);
+    //    return ret;
+    return 1;
+}
+
 static int
 ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
     ssize_t ret;
     size_t wlen;
     ubond_proto_t* proto = &(pkt->p);
-#ifdef TCP
+#if defined(TCP) && !defined(MPTCP)
     int tcp = use_tcp(pkt);
-    int fd = (tcp) ? tun->fd_tcp : tun->fd;
-#endif
+    int fd = tcp ? tun->fd_tcp : tun->fd;
+#else
     int fd = tun->fd;
-
+#endif
     wlen = PKTHDRSIZ(pkt->p) + pkt->p.len;
     // this is the last chnce of rthe sock stream to say "Oh, we dont need that resend".. so it might pull the packet at this late status_changed
-    if (!sock_stamp(pkt)) {
-        ubond_pkt_release_s(pkt);
-        return 0;
-    }
+    //    if (!sock_stamp(pkt)) {
+    //        ubond_pkt_release_s(pkt);
+    //        return 0;
+    //    }
 
     // we should still use this to measure packet loss even if they are UDP packets
     // tun seq incrememts even if we resend
-#ifdef TCP
+#if defined(TCP) && !defined(MPTCP)
     if (tcp) {
         proto->tun_seq = 0;
     } else
@@ -822,7 +950,14 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 
     {
         pkt->sent += ret;
-        tun->sending = pkt;
+#if defined(TCP) && !defined(MPTCP)
+        if (tcp) {
+            tun->sending_tcp = pkt;
+        } else
+#endif
+        {
+            tun->sending = pkt;
+        }
         tun->busy_writing++; // semaphore that we're busy
 
         tun->sentpackets++;
@@ -837,7 +972,7 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         tun->bytes_since_adjust += wlen + IP4_UDP_OVERHEAD;
 
         pkt->last_sent = now64;
-#ifdef TCP
+#if defined(TCP) && !defined(MPTCP)
         if (tcp) {
             if (!ev_is_active(&tun->io_tcp_write)) {
                 ev_io_start(EV_A_ & tun->io_tcp_write);
@@ -851,15 +986,15 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         }
 
 #ifdef RESEND
-    // old_pkts is a ring buffer of the last N packets.
-    // The packets may be still held by the stream.
-    if (tun->old_pkts[tun->seq % RESENDBUFSIZE]) {
-        ubond_pkt_release_s(tun->old_pkts[tun->seq % RESENDBUFSIZE]);
-    }
-    pkt->usecnt++;
-    tun->old_pkts[tun->seq % RESENDBUFSIZE] = pkt;
-#endif    
-    //pkt->sent_tun = tun;
+        // old_pkts is a ring buffer of the last N packets.
+        // The packets may be still held by the stream.
+        if (tun->old_pkts[tun->seq % RESENDBUFSIZE]) {
+            ubond_pkt_release_s(tun->old_pkts[tun->seq % RESENDBUFSIZE]);
+        }
+        pkt->usecnt++;
+        tun->old_pkts[tun->seq % RESENDBUFSIZE] = pkt;
+#endif
+        //pkt->sent_tun = tun;
 
         // stream will handle memory
         //        if (pkt->stream) {
@@ -911,7 +1046,7 @@ ubond_rtun_do_send(ubond_tunnel_t* tun, int timed)
                 if (ev_is_active(&tun->io_write)) {
                     ev_io_stop(EV_A_ & tun->io_write);
                 }
-#ifdef TCP
+#if defined(TCP) && !defined(MPTCP)
                 if (ev_is_active(&tun->io_tcp_write)) {
                     ev_io_stop(EV_A_ & tun->io_tcp_write);
                 }
@@ -960,8 +1095,8 @@ ubond_rtun_write(EV_P_ ev_io* w, int revents)
         if (pkt->sent < pkt->len) {
             log_warnx("protocol", "Incomplete UDP packet recieved!");
         }
-        if (pkt->stream)
-            tcp_sent(pkt->stream, pkt);
+        //        if (pkt->stream)
+        //            tcp_sent(pkt->stream, pkt);
         ubond_pkt_release_s(pkt);
         tun->send_timer.repeat = (double)(pkt->len + IP4_UDP_OVERHEAD) / tun->bytes_per_sec;
         tun->sending = NULL;
@@ -973,19 +1108,21 @@ ubond_rtun_write(EV_P_ ev_io* w, int revents)
 static void ubond_rtun_tcp_write(EV_P_ ev_io* w, int revents)
 {
     check_watcher(UBOND_RTUN_TCP_WRITE);
+
     ubond_tunnel_t* tun = w->data;
-    ubond_pkt_t* pkt = tun->sending;
+    ubond_pkt_t* pkt = tun->sending_tcp;
     ssize_t ret = 0;
     if (pkt && pkt->sent < pkt->len) {
-        htobe_proto(&pkt->p);
-        char* tcp_data = (char*)&(pkt->p);
+        //        htobe_proto(&pkt->p);
+        char* tcp_data = (char*)&(pkt->p.data);
         ret = sendto(tun->fd_tcp, &(tcp_data[pkt->sent]), pkt->len - pkt->sent, MSG_DONTWAIT,
             tun->addrinfo->ai_addr, tun->addrinfo->ai_addrlen);
-        betoh_proto(&pkt->p);
+        //        printf("SIZE pkt->len %d %d %d\n", pkt->len, pkt->len - PKTHDRSIZ(pkt->p), htobe16(*(uint16_t*)(&pkt->p.data[2])) );
+        //        betoh_proto(&pkt->p);
         if (ret > 0) {
             pkt->sent += ret;
         }
-        if (ret < 0) {
+        if (ret <= 0) {
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 log_warn("net", "%s tcp write error", tun->name);
                 ubond_rtun_status_down(tun);
@@ -993,20 +1130,33 @@ static void ubond_rtun_tcp_write(EV_P_ ev_io* w, int revents)
         }
     }
     if (!pkt || pkt->sent >= pkt->len) {
+#ifndef MPTCP
         if (tun->busy_writing) {
             tun->busy_writing--;
         }
-        tun->sending = NULL;
+#endif
+        tun->sending_tcp = NULL;
         if (pkt) {
-            if (pkt->stream)
-                tcp_sent(pkt->stream, pkt);
+            //            if (pkt->stream)
+            //                tcp_sent(pkt->stream, pkt);
             ubond_pkt_release_s(pkt); // NB if stream wants it, it will have usecnt>0
-            //            log_debug("tcp", "> %s sent all %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x fd:%d)",
-            //                tun->name, pkt->len, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq, tun->fd_tcp);
+            log_debug("tcp", "> %s tcp sent all %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x fd:%d)",
+                tun->name, pkt->len, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq, tun->fd_tcp);
+#ifndef MPTCP
             tun->send_timer.repeat = (double)(pkt->len + IP4_UDP_OVERHEAD) / tun->bytes_per_sec;
+#endif
+            if (ev_is_active(&tun->tcp_w_check_ev))
+                ev_check_stop(EV_A_ & tun->tcp_w_check_ev);
+        } else {
+            if (!ev_is_active(&tun->tcp_w_check_ev))
+                ev_check_start(EV_A_ & tun->tcp_w_check_ev);
         }
+#ifdef MPTCP
+        ubond_mptcp_rtun_send();
+#else
         ev_io_stop(EV_A_ & tun->io_tcp_write);
-        ubond_rtun_do_send(tun, 0);
+        ubond_rtun_send(tun, 0);
+#endif
     }
 }
 #endif
@@ -1070,6 +1220,7 @@ ubond_rtun_new(const char* name,
 #ifdef TCP
     new->fd_tcp = -1;
     new->fd_tcp_conn = -1;
+    new->tcp_authenticated = 0;
 #endif
     new->server_mode = server_mode;
     new->weight = 1;
@@ -1157,7 +1308,13 @@ ubond_rtun_new(const char* name,
     new->lossless = 0;
 #ifdef TCP
     new->tcp_fill = NULL;
+    new->tcp_r_check_ev.data = new;
+    ev_check_init(&new->tcp_r_check_ev, ubond_tcp_r_check);
+    new->tcp_w_check_ev.data = new;
+    ev_check_init(&new->tcp_w_check_ev, ubond_tcp_w_check);
+
 #endif
+    new->sending_tcp = NULL;
     new->sending = NULL;
     update_process_title();
     return new;
@@ -1447,18 +1604,112 @@ static void socket_close(ubond_tunnel_t* t)
 }
 
 #ifdef TCP
+static void ubond_mptcp_authorise(ubond_tunnel_t* tun)
+{
+    char data[] = {
+        4, 7, 0, 28, //0
+        0, 0, 0, 0, //4
+        0, 6, 0, 0, //8
+        0, 0, 0, 0, //12
+        0, 0, 0, 0, //16
+        0x42, 0x42, 0x42, 0x42, //20
+        0, 0, 0, 0 //24
+    };
+
+    ubond_pkt_t* pkt = ubond_pkt_get();
+    if (!tun->server_mode) {
+        *(uint32_t*)(&data[24]) = htobe32(*(uint32_t*)ubond_options.password);
+    }
+    memcpy(&(pkt->p.data), data, 28);
+    pkt->p.len = htobe16(*(uint16_t*)(&pkt->p.data[2]));
+    pkt->p.type = UBOND_PKT_DATA;
+    ubond_pkt_insert(&mptcp_buffer, pkt);
+    ubond_mptcp_rtun_send();
+    log_warnx("NULL", " access %x %x", be32toh(*(uint32_t*)(&pkt->p.data[24])), *(uint32_t*)ubond_options.password);
+    log_warnx("tcp", "Sending Auth to TCP tunnel");
+}
+static int ubond_mptcp_check_auth(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
+{
+    if (pkt->p.data[1] == 7 && *(uint32_t*)(&(pkt->p.data[20])) == 0x42424242) {
+        if (*(uint32_t*)(&pkt->p.data[24]) == 0) {
+            log_debug("tcp", "Auth request received");
+            ubond_mptcp_authorise(tun);
+        } else {
+            if (be32toh(*(uint32_t*)(&pkt->p.data[24])) != *(uint32_t*)ubond_options.password) {
+                log_warnx("NULL", "UNAUTHORISED access %x %x", be32toh(*(uint32_t*)(&pkt->p.data[24])), *(uint32_t*)ubond_options.password);
+            } else {
+                log_warnx("tcp", "Authorised TCP tunnel");
+                tun->tcp_authenticated = 1;
+            }
+        }
+        return 0;
+    }
+    if (!tun->tcp_authenticated)
+        log_warnx("tcp", "Recieved unautherised packet");
+    return tun->tcp_authenticated;
+}
 static void ubond_rtun_accept(EV_P_ ev_io* w, int revents)
 {
     check_watcher(UBOND_RTUN_ACCEPT);
     ubond_tunnel_t* t = w->data;
 
     t->fd_tcp = accept(t->fd_tcp_conn, 0, 0);
-    log_info(NULL, "%s TCP socket connection accepted (fd %d)", t->name, t->fd_tcp);
+    if (t->fd_tcp > 0) {
+        log_info(NULL, "%s TCP socket connection accepted (fd %d)", t->name, t->fd_tcp);
 
-    ev_io_set(&t->io_tcp_read, t->fd_tcp, EV_READ);
-    ev_io_start(EV_A_ & t->io_tcp_read);
-    ev_io_set(&t->io_tcp_write, t->fd_tcp, EV_WRITE);
-    //ev_io_start(EV_A_ & t->io_tcp_write);
+        ev_io_set(&t->io_tcp_read, t->fd_tcp, EV_READ);
+        ev_io_start(EV_A_ & t->io_tcp_read);
+        ev_io_set(&t->io_tcp_write, t->fd_tcp, EV_WRITE);
+        ev_io_start(EV_A_ & t->io_tcp_write);
+
+        ubond_mptcp_authorise(t);
+    }
+}
+#endif
+
+#if 0
+static int set_mptcp_options(int sockfd, int level)
+{
+    if (sockfd != 0 && level == IPPROTO_TCP) {
+        int enable = 1;
+        int ret = setsockopt(sockfd, level, MPTCP_ENABLED, &enable, sizeof(enable));
+
+        if (ret < 0) {
+            fprintf(stderr, "setsockopt: MPTCP_ENABLED error %s!\n", strerror(errno));
+            fflush(stderr);
+            return ret;
+        }
+
+        char pathmanager[] = "fullmesh";
+        ret = setsockopt(sockfd, level, MPTCP_PATH_MANAGER, pathmanager, sizeof(pathmanager));
+
+        if (ret < 0) {
+            fprintf(stderr, "setsockopt: MPTCP_PATH_MANAGER error %s!\n", strerror(errno));
+            fflush(stderr);
+            return ret;
+        }
+
+        char scheduler[] = "default";
+        ret = setsockopt(sockfd, level, MPTCP_SCHEDULER, scheduler, sizeof(scheduler));
+
+        if (ret < 0) {
+            fprintf(stderr, "setsockopt: MPTCP_SCHEDULER error %s!\n", strerror(errno));
+            fflush(stderr);
+            return ret;
+        }
+
+        int val = MPTCP_INFO_FLAG_SAVE_MASTER;
+        ret = setsockopt(sockfd, level, MPTCP_INFO, &val, sizeof(val));
+
+        if (ret < 0) {
+            fprintf(stderr, "setsockopt: MPTCP_INFO error %s!\n", strerror(errno));
+            fflush(stderr);
+        }
+
+        return ret;
+    }
+
+    return 0;
 }
 #endif
 
@@ -1506,13 +1757,17 @@ ubond_rtun_start(ubond_tunnel_t* t)
                 return socket_close(t);
             }
         }
+        //#ifndef MPTCP
         if (ubond_rtun_bind(t, t->fd_tcp, SOCK_STREAM) < 0) {
             return socket_close(t);
         }
+        //#else
+        //        set_mptcp_options(t->fd_tcp, IPPROTO_TCP);
+        //#endif
         ubond_sock_set_nonblocking(t->fd_tcp);
         if (connect(t->fd_tcp, t->addrinfo->ai_addr, t->addrinfo->ai_addrlen)) {
             if (errno == EINPROGRESS) {
-                log_warn(NULL, "%s tcp tunnel socket CONNECTTING to %s (port %s   UDP fd: %d TCP fd: %d)",
+                log_warn(NULL, "%s tcp tunnel socket CONNECTING to %s (port %s   UDP fd: %d TCP fd: %d)",
                     t->name, t->destaddr, t->destport, t->fd, t->fd_tcp);
             } else {
                 log_info(NULL, "%s tcp tunnel socket CANT CONNECT to %s (port %s   UDP fd: %d TCP fd: %d)",
@@ -1526,6 +1781,35 @@ ubond_rtun_start(ubond_tunnel_t* t)
         ev_io_set(&t->io_tcp_read, t->fd_tcp, EV_READ);
         ev_io_set(&t->io_tcp_write, t->fd_tcp, EV_WRITE);
         ev_io_start(EV_A_ & t->io_tcp_read);
+        ev_io_start(EV_A_ & t->io_tcp_write);
+
+        t->tcp_authenticated = 1; // We're the client !
+        ubond_mptcp_authorise(t);
+
+#if 0
+        {
+            struct mptcp_info minfo;
+            struct mptcp_meta_info meta_info;
+            struct tcp_info initial;
+            struct tcp_info others[16]; // increase it if needed
+            struct mptcp_sub_info others_info[16]; // same
+            socklen_t len;
+
+            len = sizeof(minfo);
+            minfo.tcp_info_len = sizeof(struct tcp_info);
+            minfo.sub_len = sizeof(others);
+            minfo.meta_len = sizeof(struct mptcp_meta_info);
+            minfo.meta_info = &meta_info;
+            minfo.initial = &initial;
+            minfo.subflows = &others;
+            minfo.sub_info_len = sizeof(struct mptcp_sub_info);
+            minfo.total_sub_info_len = sizeof(others_info);
+            minfo.subflow_info = &others_info;
+
+            getsockopt(t->fd_tcp, IPPROTO_TCP, MPTCP_INFO, &minfo, &len);
+            printf("here");
+        }
+#endif
     }
 #endif
 }
@@ -2075,7 +2359,7 @@ ubond_rtun_choose(ubond_tunnel_t* rtun)
     if (!spkt)
         return;
 
-    activate_streams();
+    //    activate_streams();
     if (!ev_is_active(&tuntap.io_read)) {
         ev_io_start(EV_A_ & tuntap.io_read);
     }
@@ -2207,6 +2491,9 @@ ubond_rtun_check_timeout(EV_P_ ev_timer* w, int revents)
     } else {
         ubond_rtun_send_keepalive(now, t);
     }
+#ifdef PROF_WATCH
+    print_checkers();
+#endif
 }
 
 static void
@@ -2216,8 +2503,15 @@ tuntap_io_event(EV_P_ ev_io* w, int revents)
     if (revents & EV_READ) {
         ubond_pkt_t* pkt;
         // while?
-        if (!ubond_pkt_list_is_full(&send_buffer) && (pkt = ubond_tuntap_read(&tuntap))) {
-            pkt->stream = NULL;
+        if (!ubond_pkt_list_is_full(&mptcp_buffer) && !ubond_pkt_list_is_full(&send_buffer) && (pkt = ubond_tuntap_read(&tuntap))) {
+#ifdef MPTCP
+            if (use_tcp(pkt)) {
+                ubond_pkt_insert(&mptcp_buffer, pkt); // dont count the bandwidth
+                ubond_mptcp_rtun_send();
+                return;
+            }
+#endif
+            //            pkt->stream = NULL;
             //pkt->sent_tun = NULL;
             pkt->p.data_seq = next_data_seq(); // this is normal data, not tcp data
             ubond_buffer_write(&send_buffer, pkt);
@@ -2234,9 +2528,18 @@ tuntap_io_event(EV_P_ ev_io* w, int revents)
         }
         if (ubond_pkt_list_is_full_watermark(&send_buffer)) {
             if (ev_is_active(&tuntap.io_read)) {
+                //                log_warnx(NULL, "stopping io_read (sendbuffer full)");
                 ev_io_stop(EV_A_ & tuntap.io_read);
             }
         }
+#ifdef MPTCP
+        if (ubond_pkt_list_is_full(&mptcp_buffer)) {
+            if (ev_is_active(&tuntap.io_read)) {
+                //                log_warnx(NULL, "stopping io_read (mptcp full)");
+                ev_io_stop(EV_A_ & tuntap.io_read);
+            }
+        }
+#endif
     } else if (revents & EV_WRITE) {
 #if 0        
         if (!UBOND_TAILQ_EMPTY(&tuntap.sbuf)) {
@@ -2506,9 +2809,10 @@ int main(int argc, char** argv)
         //int i=0;
         //LIST_FOREACH(t, &rtuns, entries) {i++;}
         //ubond_pkt_list_init(&send_buffer, i*2);
-        ubond_pkt_list_init(&send_buffer, PKTBUFSIZE * 100);
+        ubond_pkt_list_init(&send_buffer, PKTBUFSIZE * 10);
         ubond_pkt_list_init(&hpsend_buffer, PKTBUFSIZE);
         ubond_pkt_list_init(&incomming, PKTBUFSIZE);
+        ubond_pkt_list_init(&mptcp_buffer, PKTBUFSIZE);
     }
 
     if (ubond_tuntap_alloc(&tuntap) <= 0)
@@ -2523,8 +2827,8 @@ int main(int argc, char** argv)
     //ev_io_set(&tuntap.io_write, tuntap.fd, EV_WRITE);
     ev_io_start(EV_A_ & tuntap.io_read);
 
-    /* tcp socket init */
-    socks_init();
+    //    /* tcp socket init */
+    //    socks_init();
 
     priv_set_running_state();
 

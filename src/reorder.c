@@ -179,9 +179,9 @@ uint32_t next_data_seq()
 
 void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
-    if (pkt->p.flow_id) {
-        fatalx("Can not re-order TCP stream");
-    }
+//    if (pkt->p.flow_id) {
+//        fatalx("Can not re-order TCP stream");
+//    }
 
     if (reorder_buffer.state == REORDER_BUF_RESET) {
         reorder_buffer.next = reorder_buffer.head = pkt->p.data_seq;
