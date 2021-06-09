@@ -126,9 +126,6 @@ int ubond_config(int config_file_fd, int first_time)
                             sizeof(ubond_options.control_bind_port));
                         free(tmp);
                     }
-                    _conf_set_uint_from_conf(
-                        config, lastSection, "tcp_socket", &tcp_socket, 1211, NULL, 0);
-                    ubond_options.tcp_socket = tcp_socket;
                 }
                 /* This is important to be parsed every time because
                  * it's used later in the configuration parsing

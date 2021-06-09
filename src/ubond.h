@@ -21,7 +21,7 @@
 /* Many thanks Fabien Dupont! */
 #ifdef HAVE_LINUX
 
-#define  TCP
+#define TCP
 
 /* Absolutely essential to have it there for IFNAMSIZ */
 #include <linux/if.h>
@@ -119,7 +119,7 @@ struct ubond_options_s {
     int root_allowed;
     uint32_t reorder_buffer_size;
     uint32_t fallback_available;
-    uint32_t tcp_socket;
+    //    uint32_t tcp_socket;
 };
 
 struct ubond_status_s {
@@ -205,22 +205,11 @@ typedef struct ubond_tunnel_s {
     int busy_writing;
 
     ubond_pkt_t* sending;
-    ubond_pkt_t* sending_tcp;    
+    ubond_pkt_t* sending_tcp;
 #ifdef RESEND
-    ubond_pkt_t *old_pkts[RESENDBUFSIZE];
+    ubond_pkt_t* old_pkts[RESENDBUFSIZE];
 #endif
 
-#ifdef TCP
-    int fd_tcp;
-    int fd_tcp_conn;
-    ev_io io_accept;
-    ev_io io_tcp_read;
-    ev_io io_tcp_write;
-    ubond_pkt_t* tcp_fill;
-    ev_check tcp_r_check_ev;
-    ev_check tcp_w_check_ev;    
-    int tcp_authenticated;
-#endif
 } ubond_tunnel_t;
 
 #ifdef HAVE_FILTERS
@@ -253,6 +242,12 @@ ubond_tunnel_t* ubond_filters_choose(uint32_t pktlen, const u_char* pktdata);
 void ubond_buffer_write(ubond_pkt_list_t* buffer, ubond_pkt_t* p);
 int ubond_pkt_list_is_full(ubond_pkt_list_t* list);
 int ubond_pkt_list_is_full_watermark(ubond_pkt_list_t* list);
+int use_tcp(ubond_pkt_t* pkt);
+void ubond_rtun_inject_tuntap(ubond_pkt_t* pkt);
+uint64_t get_secret();
+void start_tuntap_read();
+int ubond_rtun_start_socket(ubond_tunnel_t* t, int socktype);
+int ubond_rtun_bind(ubond_tunnel_t* t, int fd, int socktype);
 
 enum checker_id {
     NO_CHECKER,
@@ -271,10 +266,10 @@ enum checker_id {
     UBOND_CONFIG_RELOAD,
     UBOND_QUIT,
     UBOND_REORDER_TICK,
-//    SOCKS_ON_READ_CB,
-//    SOCKS_ON_WRITE_CB,
-//    SOCKS_ON_ACCEPT_CB,
-//    SOCKS_RESEND_TIMER,
+    //    SOCKS_ON_READ_CB,
+    //    SOCKS_ON_WRITE_CB,
+    //    SOCKS_ON_ACCEPT_CB,
+    //    SOCKS_RESEND_TIMER,
     UBOND_TCP_RW_IDLE_CHECK,
     MAX_CHECKERS
 };

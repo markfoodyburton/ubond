@@ -17,6 +17,7 @@ ubond_SOURCES = \
     reorder.h reorder.c \
     timestamp.h timestamp.c \
     tuntap_generic.c tuntap_generic.h \
+    mptcp.c mptcp.h \
     ubond.c ubond.h
 
 # There are better ways to do that, using a "compat" library
