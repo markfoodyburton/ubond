@@ -133,6 +133,7 @@ static void idle_check_watcher(EV_P_ ev_idle* w, int revents)
 }
 static void print_checkers()
 {
+    return;
     for (int i = 0; i < MAX_CHECKERS; i++) {
         printf("%d %d\n", i, checker_xtimes[i]);
     }
@@ -1008,10 +1009,13 @@ ubond_rtun_new(const char* name,
     if (bandwidth_max == 0) {
         log_warnx("config",
             "Enabling automatic bandwidth adjustment");
-        bandwidth_max = 10000; // faster lines will go up faster from 10000, slower
-        // ones will drop from here.... it's a compromise
+        new->bandwidth_max = 10000; // faster lines will go up faster from 10000, slower
+            // ones will drop from here.... it's a compromise
+        new->autobw = 1;
+    } else {
+        new->bandwidth_max = bandwidth_max;
+        new->autobw = 0;
     }
-    new->bandwidth_max = bandwidth_max;
     new->bandwidth_measured = 0;
     new->bm_data = 0;
     new->fallback_only = fallback_only;
@@ -1458,6 +1462,14 @@ ubond_rtun_status_up(ubond_tunnel_t* t)
         priv_run_script(3, cmdargs, env_len, env);
         ubond_free_script_env(env);
         ubond_rtun_tuntap_up();
+
+        /* stamp the tunnel to avoide keepalive timeouts as script may take time*/
+        ev_now_update(EV_A);
+        ubond_tunnel_t* tun;
+        LIST_FOREACH(tun, &rtuns, entries)
+        {
+            ubond_rtun_tick(tun);
+        }
     }
 
     while (!UBOND_TAILQ_EMPTY(&t->sbuf)) {
@@ -1466,6 +1478,7 @@ ubond_rtun_status_up(ubond_tunnel_t* t)
     while (!UBOND_TAILQ_EMPTY(&t->hpsbuf)) {
         ubond_pkt_release(UBOND_TAILQ_POP_LAST(&t->hpsbuf));
     }
+    mptcp_restart(EV_A);
 }
 
 void ubond_rtun_status_down(ubond_tunnel_t* t)
@@ -1808,53 +1821,55 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
         }
       }
 */
-            // hunt a high watermark with slow drift
-            if (bandwidth_sent > t->bandwidth_max / 2) {
-                double new_bwm = t->bandwidth_max;
+            if (t->autobw) {
+                // hunt a high watermark with slow drift
+                if (bandwidth_sent > t->bandwidth_max / 2) {
+                    double new_bwm = t->bandwidth_max;
 
-                if (t->sent_loss < (LOSS_TOLERENCE / 4.0) && (t->srtt < 3 * t->srtt_min)) {
+                    if (t->sent_loss < (LOSS_TOLERENCE / 4.0) && (t->srtt < 3 * t->srtt_min)) {
 
-                    if (t->sent_loss == 0 && ((double)(t->bandwidth_out) > ((double)(t->bandwidth_max) * 0.80))) {
-                        if (t->lossless) {
-                            // FASTGROTH MODE
-                            new_bwm *= 1.01;
+                        if (t->sent_loss == 0 && ((double)(t->bandwidth_out) > ((double)(t->bandwidth_max) * 0.80))) {
+                            if (t->lossless) {
+                                // FASTGROTH MODE
+                                new_bwm *= 1.01;
+                            } else {
+                                t->lossless++;
+                            }
                         } else {
-                            t->lossless++;
+                            if (t->sent_loss != 0 && t->lossless) {
+                                // correct old fastgrowth
+                                new_bwm *= 0.99;
+                            }
+                            t->lossless = 0;
+                        }
+                        // normal growth
+                        if (t->bandwidth_out > t->bandwidth_max) {
+                            new_bwm = ((new_bwm * 9) + t->bandwidth_out) / 10;
                         }
                     } else {
-                        if (t->sent_loss != 0 && t->lossless) {
+                        if (t->lossless) {
                             // correct old fastgrowth
                             new_bwm *= 0.99;
                         }
+                        if (t->srtt > 3 * t->srtt_min) {
+                            new_bwm *= 0.99;
+                        }
                         t->lossless = 0;
+                        if (t->bandwidth_out < bandwidth_sent) {
+                            new_bwm *= 0.995;
+                        }
+                        if (new_bwm < 100)
+                            new_bwm = 100;
                     }
-                    // normal growth
-                    if (t->bandwidth_out > t->bandwidth_max) {
-                        new_bwm = ((new_bwm * 9) + t->bandwidth_out) / 10;
-                    }
+                    t->bandwidth_max = new_bwm;
                 } else {
-                    if (t->lossless) {
-                        // correct old fastgrowth
-                        new_bwm *= 0.99;
+                    if (reductions > 50) { // more than 50% reductions, we should reduce bandwidth
+                        t->bandwidth_max *= 0.99;
                     }
-                    if (t->srtt > 3 * t->srtt_min) {
-                        new_bwm *= 0.99;
-                    }
+                    if (t->bandwidth_max < 100)
+                        t->bandwidth_max = 100;
                     t->lossless = 0;
-                    if (t->bandwidth_out < bandwidth_sent) {
-                        new_bwm *= 0.995;
-                    }
-                    if (new_bwm < 100)
-                        new_bwm = 100;
                 }
-                t->bandwidth_max = new_bwm;
-            } else {
-                if (reductions > 50) { // more than 50% reductions, we should reduce bandwidth
-                    t->bandwidth_max *= 0.99;
-                }
-                if (t->bandwidth_max < 100)
-                    t->bandwidth_max = 100;
-                t->lossless = 0;
             }
         }
         t->bytes_since_adjust = 0;

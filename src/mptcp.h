@@ -22,3 +22,4 @@ typedef struct ubond_mptcp_tunnel_s {
 
 int ubond_mptcp_rtun_send(EV_P);
 void ubond_mptcp_rtun_new(EV_P_ ubond_tunnel_t* base);
+void mptcp_restart(EV_P);

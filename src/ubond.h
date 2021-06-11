@@ -183,6 +183,7 @@ typedef struct ubond_tunnel_s {
     uint32_t timeout; /* configured timeout in seconds */
     uint64_t bandwidth_max; /* max bandwidth in bytes per second */
     //uint64_t bandwidth;   /* current bandwidth in bytes per second */
+    int autobw;
     uint64_t bandwidth_measured;
     uint64_t bm_data;
     uint64_t bandwidth_out;

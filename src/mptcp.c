@@ -16,6 +16,11 @@ static void mptcp_socket_reconnect(EV_P_ ubond_mptcp_tunnel_t* t);
 ubond_pkt_list_t mptcp_buffer;
 ubond_mptcp_tunnel_t* mptun = NULL;
 
+void mptcp_restart(EV_P)
+{
+     mptcp_socket_close(EV_A_ mptun);
+}
+
 void ubond_mptcp_rtun_new(EV_P_ ubond_tunnel_t* base)
 {
     if (mptun)
@@ -279,7 +284,7 @@ static int ubond_mptcp_check_auth(EV_P_ ubond_mptcp_tunnel_t* tun, ubond_pkt_t* 
             ubond_mptcp_authorise(EV_A_ tun);
         } else {
             if (be32toh(*(uint32_t*)(&pkt->p.data[24])) != get_secret()) {
-                log_warnx("NULL", "UNAUTHORISED access");
+                log_warnx("tcp", "UNAUTHORISED access");
                 tun->tcp_authenticated = 0;
             } else {
                 log_warnx("tcp", "Authorised TCP tunnel");
@@ -302,7 +307,7 @@ static void ubond_rtun_accept(EV_P_ ev_io* w, int revents)
     }
     t->fd_tcp = accept(t->fd_tcp_conn, 0, 0);
     if (t->fd_tcp > 0) {
-        log_info(NULL, "TCP socket connection accepted (fd %d)", t->fd_tcp);
+        log_info("tcp", "TCP socket connection accepted (fd %d)", t->fd_tcp);
 
         ev_io_set(&t->io_tcp_read, t->fd_tcp, EV_READ);
         ev_io_start(EV_A_ & t->io_tcp_read);
@@ -332,7 +337,7 @@ ubond_rtun_start_tcp(EV_P_ ubond_mptcp_tunnel_t* mt)
             if (listen(mt->fd_tcp_conn, 1)) {
                 return mptcp_socket_close(EV_A_ mt);
             } //listen for a single tcp connection
-            log_info(NULL, "tcp tunnel based on tunnel %s, socket listening on %s (port %s   UDP fd: %d TCP fd: %d)",
+            log_info("tcp", "tcp tunnel based on tunnel %s, socket listening on %s (port %s   UDP fd: %d TCP fd: %d)",
                 t->name, t->bindaddr ? t->bindaddr : "any", t->bindport, t->fd, mt->fd_tcp_conn);
             ev_io_set(&mt->io_accept, mt->fd_tcp_conn, EV_READ);
             ev_io_start(EV_A_ & mt->io_accept);
@@ -352,15 +357,15 @@ ubond_rtun_start_tcp(EV_P_ ubond_mptcp_tunnel_t* mt)
         ubond_sock_set_nonblocking(mt->fd_tcp);
         if (connect(mt->fd_tcp, t->addrinfo->ai_addr, t->addrinfo->ai_addrlen)) {
             if (errno == EINPROGRESS) {
-                log_warn(NULL, "tcp tunnel socket CONNECTING to %s (port %s   UDP fd: %d TCP fd: %d)",
+                log_warn("tcp", "tcp tunnel socket CONNECTING to %s (port %s   UDP fd: %d TCP fd: %d)",
                     t->destaddr, t->destport, t->fd, mt->fd_tcp);
             } else {
-                log_info(NULL, "tcp tunnel socket CANT CONNECT to %s (port %s   UDP fd: %d TCP fd: %d)",
+                log_info("tcp", "tcp tunnel socket CANT CONNECT to %s (port %s   UDP fd: %d TCP fd: %d)",
                     t->destaddr, t->destport, t->fd, mt->fd_tcp);
                 return mptcp_socket_close(EV_A_ mt);
             }
         } else {
-            log_info(NULL, "tcp tunnel socket connected to %s (port %s   UDP fd: %d TCP fd: %d)",
+            log_info("tcp", "tcp tunnel socket connected to %s (port %s   UDP fd: %d TCP fd: %d)",
                 t->destaddr, t->destport, t->fd, mt->fd_tcp);
         }
         ev_io_set(&mt->io_tcp_read, mt->fd_tcp, EV_READ);
