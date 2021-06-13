@@ -78,7 +78,9 @@ enum cmd_types {
     PRIV_RELOAD_RESOLVER,
     PRIV_GETADDRINFO,
     PRIV_SET_RUNNING_STATE, /* ready for maximum security */
-    PRIV_SET_TRANSPARENT /* mark a socket transparent */
+    PRIV_SET_TRANSPARENT, /* mark a socket transparent */
+    PRIV_MPTCP,
+    PRIV_PRINT_MPTCP,
 };
 
 /* Error message for some communication between processes */
@@ -101,6 +103,9 @@ static void must_read(int, void*, size_t);
 static void must_write(int, void*, size_t);
 static int may_read(int, void*, size_t);
 static void reset_default_signals();
+
+extern int set_mptcp_options(int sockfd, int level);
+extern void print_mptcp_opts(int sockfd);
 
 int priv_init(char* argv[], char* username)
 {
@@ -479,6 +484,22 @@ int priv_init(char* argv[], char* username)
                 close(fd);
             break;
         }
+        case PRIV_MPTCP: {
+            int sockfd;
+            sockfd=receive_fd(socks[0]);
+            int r=set_mptcp_options(sockfd, IPPROTO_TCP);
+            must_write(socks[0], &r, sizeof(r));
+            close(sockfd);
+            break;
+        }
+        case PRIV_PRINT_MPTCP: {
+            int sockfd;
+            sockfd=receive_fd(socks[0]);
+            print_mptcp_opts(sockfd);
+            close(sockfd);
+            break;
+        }
+
         default:
             errx(1, "unknown command %d", cmd);
             break;
@@ -785,6 +806,34 @@ int priv_set_socket_transparent(int bindport)
     must_write(priv_fd, &bindport, sizeof(bindport));
     return receive_fd(priv_fd);
 }
+
+int priv_set_mptcp(int fd)
+{
+    //return 0;
+    int cmd, retval;
+    if (priv_fd < 0)
+        errx(1, "%s: called from privileged portion",
+            "priv_set_socket_transparent");
+    cmd = PRIV_MPTCP;
+    must_write(priv_fd, &cmd, sizeof(cmd));
+    send_fd(priv_fd, fd);
+    must_read(priv_fd, &retval, sizeof(retval));
+    return retval;
+}
+
+int priv_print_mptcp(int fd)
+{
+    //return 0;
+    int cmd, retval;
+    if (priv_fd < 0)
+        errx(1, "%s: called from privileged portion",
+            "priv_set_socket_transparent");
+    cmd = PRIV_PRINT_MPTCP;
+    must_write(priv_fd, &cmd, sizeof(cmd));
+    send_fd(priv_fd, fd);
+    // dontwait
+}
+
 
 /* Child can signal that its initial parsing is done, so that parent
  * can revoke further logfile permissions.  This call only works once. */

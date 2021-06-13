@@ -2,6 +2,7 @@
 #include <errno.h>
 
 #include "mptcp.h"
+#include "privsep.h"
 
 static void ubond_rtun_accept(EV_P_ ev_io* w, int revents);
 static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents);
@@ -18,7 +19,7 @@ ubond_mptcp_tunnel_t* mptun = NULL;
 
 void mptcp_restart(EV_P)
 {
-     mptcp_socket_close(EV_A_ mptun);
+    mptcp_socket_close(EV_A_ mptun);
 }
 
 void ubond_mptcp_rtun_new(EV_P_ ubond_tunnel_t* base)
@@ -55,7 +56,7 @@ void ubond_mptcp_rtun_new(EV_P_ ubond_tunnel_t* base)
     ev_check_init(&new->tcp_w_check_ev, ubond_tcp_w_check);
     new->sending_tcp = NULL;
 
-    log_debug("tcp", "Setup tcp tunnel (based on %s)", base->name);
+    log_info("tcp", "Setup tcp tunnel (based on %s)", base->name);
     mptun = new;
 }
 
@@ -309,6 +310,9 @@ static void ubond_rtun_accept(EV_P_ ev_io* w, int revents)
     if (t->fd_tcp > 0) {
         log_info("tcp", "TCP socket connection accepted (fd %d)", t->fd_tcp);
 
+        log_warnx("tcp", "set mptcp options on fd %d", t->fd_tcp);
+        //        priv_set_mptcp(t->fd_tcp);
+
         ev_io_set(&t->io_tcp_read, t->fd_tcp, EV_READ);
         ev_io_start(EV_A_ & t->io_tcp_read);
         ev_io_set(&t->io_tcp_write, t->fd_tcp, EV_WRITE);
@@ -343,16 +347,19 @@ ubond_rtun_start_tcp(EV_P_ ubond_mptcp_tunnel_t* mt)
             ev_io_start(EV_A_ & mt->io_accept);
         }
     } else {
-        if (mt->fd_tcp < 0) {
+        if (mt->fd_tcp <= 0) {
             if ((mt->fd_tcp = ubond_rtun_start_socket(t, SOCK_STREAM)) < 0) {
                 return mptcp_socket_close(EV_A_ mt);
             }
         }
 
+        log_warnx("tcp", "set mptcp options on fd %d", mt->fd_tcp);
+        //set_mptcp_options(mt->fd_tcp, IPPROTO_TCP);
+        priv_set_mptcp(mt->fd_tcp);
+
         if (ubond_rtun_bind(t, mt->fd_tcp, SOCK_STREAM) < 0) {
             return mptcp_socket_close(EV_A_ mt);
         }
-        //        set_mptcp_options(t->fd_tcp, IPPROTO_TCP);
 
         ubond_sock_set_nonblocking(mt->fd_tcp);
         if (connect(mt->fd_tcp, t->addrinfo->ai_addr, t->addrinfo->ai_addrlen)) {
@@ -415,12 +422,47 @@ ubond_rtun_check_tcp_timeout(EV_P_ ev_timer* w, int revents)
             ubond_mptcp_authorise(EV_A_ t);
         }
     }
-    //mptcp_socket_close(EV_A_ t);
+    //priv_print_mptcp(t->fd_tcp);
+    //print_mptcp_opts(t->fd_tcp);
 }
 
-#if 0
-static int set_mptcp_options(int sockfd, int level)
+int print_mptcp_opts(int sockfd)
 {
+
+    log_warnx("tcp", "tcp fd %d", sockfd);
+    struct mptcp_info minfo;
+    struct mptcp_meta_info meta_info;
+    struct tcp_info initial;
+    struct tcp_info others[10]; // increase it if needed
+    struct mptcp_sub_info others_info[10]; // same
+    socklen_t len;
+
+    len = sizeof(minfo);
+    minfo.tcp_info_len = sizeof(struct tcp_info);
+    minfo.sub_len = sizeof(others);
+    minfo.meta_len = sizeof(struct mptcp_meta_info);
+    minfo.meta_info = &meta_info;
+    minfo.initial = &initial;
+    minfo.subflows = &others;
+    minfo.sub_info_len = sizeof(struct mptcp_sub_info);
+    minfo.total_sub_info_len = sizeof(others_info);
+    minfo.subflow_info = &others_info;
+
+    int r;
+    if (getsockopt(sockfd, IPPROTO_TCP, MPTCP_INFO, &minfo, &len)) {
+        log_warn("tcp", "Cant getsockopt");
+    } else {
+        log_warnx("tcp", "Got info %d %d %d", minfo.sub_len, minfo.tcp_info_len, minfo.sub_len/ minfo.tcp_info_len);
+        log_warnx("tcp", "bytes:%d/%d\tuna:%d\trtt:%d\t", initial.tcpi_bytes_sent, initial.tcpi_bytes_received, initial.tcpi_unacked, initial.tcpi_rtt);
+        for (int i = 0; i < minfo.sub_len/ minfo.tcp_info_len; i++) {
+            log_warnx("tcp", "bytes:%d/%d\tuna:%d\trtt:%d\tAddr:%s", others[i].tcpi_bytes_sent, others[i].tcpi_bytes_received, others[i].tcpi_unacked, others[i].tcpi_rtt, inet_ntoa(others_info[i].src_v4.sin_addr));
+        }
+    }
+}
+
+int set_mptcp_options(int sockfd, int level)
+{
+    log_warnx("tcp", "set mptcp options on fd %d", sockfd);
     if (sockfd != 0 && level == IPPROTO_TCP) {
         int enable = 1;
         int ret = setsockopt(sockfd, level, MPTCP_ENABLED, &enable, sizeof(enable));
@@ -428,7 +470,7 @@ static int set_mptcp_options(int sockfd, int level)
         if (ret < 0) {
             fprintf(stderr, "setsockopt: MPTCP_ENABLED error %s!\n", strerror(errno));
             fflush(stderr);
-            return ret;
+            //return ret;
         }
 
         char pathmanager[] = "fullmesh";
@@ -462,4 +504,3 @@ static int set_mptcp_options(int sockfd, int level)
 
     return 0;
 }
-#endif

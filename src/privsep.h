@@ -22,7 +22,8 @@ int
 priv_getaddrinfo(char *host, char *serv, struct addrinfo **addrinfo,
                  struct addrinfo *hints);
 int priv_set_socket_transparent(int bindport);
-
+int priv_set_mptcp(int fd);
+int priv_print_mptcp(int fd);
 void send_fd(int sock, int fd);
 int receive_fd(int sock);
 

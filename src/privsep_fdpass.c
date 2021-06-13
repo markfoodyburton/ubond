@@ -122,6 +122,9 @@ receive_fd(int sock)
             warnx("%s: expected type %d got %d", "receive_fd",
                   SCM_RIGHTS, cmsg->cmsg_type);
         fd = (*(int *)CMSG_DATA(cmsg));
+        if (fd <=0) {
+            warnx("Bad FD received %d", fd);
+        }
         return fd;
     } else {
         errno = result;
