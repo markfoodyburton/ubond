@@ -21,7 +21,8 @@
 /* Many thanks Fabien Dupont! */
 #ifdef HAVE_LINUX
 
-#define TCP
+//#define TCP
+#define RESEND
 
 /* Absolutely essential to have it there for IFNAMSIZ */
 #include <linux/if.h>
@@ -56,7 +57,7 @@
 /* Number of packets in the queue. Each pkt is ~ 1520 */
 /* 1520 * 128 ~= 24 KBytes of data maximum per channel VMSize */
 #define PKTBUFSIZE 1024
-#define RESENDBUFSIZE 10240
+#define RESENDBUFSIZE 1024
 
 /* tuntap interface name size */
 #ifndef IFNAMSIZ
@@ -67,7 +68,7 @@
 #define MAX_TUNS 16 // maximum tunnels we can handle
 
 /* How frequently we check tunnels */
-#define UBOND_IO_TIMEOUT_DEFAULT 0.25
+#define UBOND_IO_TIMEOUT_DEFAULT 0.5
 /* What is the maximum retry timeout */
 #define UBOND_IO_TIMEOUT_MAXIMUM 60.0
 /* In case we can't open the tunnel, retry every time with previous

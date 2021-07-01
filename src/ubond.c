@@ -62,7 +62,7 @@
 #include <sys/prctl.h>
 #endif
 
-#define MPTCP
+//#define MPTCP
 
 /*
 things to do
@@ -101,8 +101,8 @@ ubond_pkt_list_t hpsend_buffer; /* send buffer */
 ubond_pkt_list_t incomming; /* incoming packet buffer */
 extern ubond_pkt_list_t mptcp_buffer;
 
-LIST_HEAD(rtunhead, ubond_tunnel_s)
-rtuns;
+LIST_HEAD(rtunhead, ubond_tunnel_s) rtuns;
+ubond_tunnel_t *tunwaiting=NULL;
 
 ev_idle read_pkt;
 
@@ -257,7 +257,7 @@ usage(char** argv)
     exit(2);
 }
 
-#ifdef TCP
+//#ifdef TCP
 int use_tcp(ubond_pkt_t* pkt)
 {
     if (((pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND) && pkt->p.data[9] == 6)) {
@@ -266,7 +266,7 @@ int use_tcp(ubond_pkt_t* pkt)
         return 0;
     }
 }
-#endif
+//#endif
 
 uint64_t get_secret()
 {
@@ -399,7 +399,7 @@ ubond_loss_update(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     if (abs(d) >= 60) {
         /* consider a connection reset. */
         log_warnx("loss", "Tun sequence reset?????");
-        ubond_reorder_reset();
+        //ubond_reorder_reset();
         tun->seq_vect = (uint64_t)-1;
         tun->seq_last = seq;
         tun->loss = 0;
@@ -408,8 +408,8 @@ ubond_loss_update(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     if (d > 0) {
         tun->seq_vect <<= d;
         tun->seq_vect |= 1ull;
-#if RESEND
-        if (d > 2) { //(tun->seq_vect & (0x1ULL << tun->reorder_length + 1)) == 0) {
+#ifdef RESEND
+        if (d > 1) { //(tun->seq_vect & (0x1ULL << tun->reorder_length + 1)) == 0) {
             //        if ((tun->seq_vect & (1ull<<3))==0) // if this isn't set, we suspect a loss.
             //        {
             //            if (d>=3) {
@@ -488,7 +488,6 @@ ubond_rtun_read_pkt(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 
     log_debug("net", "< %s recv %d bytes (size=%d, type=%d, tun seq=0x%x, data seq=0x%x, srtt=%f, loss %d %x)",
         tun->name, (int)len, pkt->p.len, pkt->p.type, pkt->p.tun_seq, pkt->p.data_seq, tun->srtt, tun->loss, tun->seq_vect);
-    ubond_rtun_tick(tun);
 
     if (tun->status >= UBOND_AUTHOK) {
         switch (pkt->p.type) {
@@ -643,6 +642,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int reavents)
             memcpy(tun->addrinfo->ai_addr, &clientaddr, addrlen);
         }
     }
+    ubond_rtun_tick(tun);
     ubond_update_srtt(tun, pkt);
     pkt->rec_tun = tun;
     UBOND_TAILQ_INSERT_HEAD(&incomming, pkt);
@@ -808,11 +808,14 @@ ubond_rtun_send(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 #ifdef RESEND
         // old_pkts is a ring buffer of the last N packets.
         // The packets may be still held by the stream.
-        if (tun->old_pkts[tun->seq % RESENDBUFSIZE]) {
-            ubond_pkt_release_s(tun->old_pkts[tun->seq % RESENDBUFSIZE]);
+        if (tun->old_pkts[proto->tun_seq % RESENDBUFSIZE]) {
+            ubond_pkt_release_s(tun->old_pkts[proto->tun_seq % RESENDBUFSIZE]);
+            tun->old_pkts[proto->tun_seq % RESENDBUFSIZE] = NULL;
         }
-        pkt->usecnt++;
-        tun->old_pkts[tun->seq % RESENDBUFSIZE] = pkt;
+        if (pkt->p.type == UBOND_PKT_DATA) {
+            pkt->usecnt++;
+            tun->old_pkts[proto->tun_seq % RESENDBUFSIZE] = pkt;
+        }
 #endif
         //pkt->sent_tun = tun;
 
@@ -932,6 +935,8 @@ ubond_rtun_write_timeout(EV_P_ ev_timer* w, int revents)
     ubond_tunnel_t* tun = w->data;
     if (!tun->busy_writing)
         ubond_rtun_do_send(tun, 1);
+    if (!tunwaiting)
+        tunwaiting = tun;
 }
 
 static void
@@ -1129,8 +1134,10 @@ ubond_rtun_recalc_weight()
     if (bwneeded < total / 4) {
         bwneeded = total / 4;
     }
-    if (send_buffer.length > tuns * 2)
-        bwneeded = total;
+
+    // not sure about this - does it help for udp?
+//    if (send_buffer.length > tuns * 2)
+//        bwneeded = total;
 
     LIST_FOREACH(t, &rtuns, entries)
     {
@@ -1185,7 +1192,7 @@ ubond_rtun_recalc_weight()
         } else {
             t->bytes_per_sec = DEFAULT_MTU * 2; //even for non-active tunnels, give
             //them enough bandwidth to do 'timeout pings' etc...
-            t->send_timer.repeat = UBOND_IO_TIMEOUT_DEFAULT / 2;
+            t->send_timer.repeat = UBOND_IO_TIMEOUT_DEFAULT / 10;
         }
     }
 }
@@ -1354,7 +1361,7 @@ ubond_rtun_start(ubond_tunnel_t* t)
         ev_io_set(&t->io_read, t->fd, EV_READ);
         ev_io_set(&t->io_write, t->fd, EV_WRITE);
         ev_io_start(EV_A_ & t->io_read);
-        t->io_timeout.repeat = UBOND_IO_TIMEOUT_DEFAULT / 2;
+        t->io_timeout.repeat = UBOND_IO_TIMEOUT_DEFAULT;
     }
 }
 
@@ -1478,7 +1485,9 @@ ubond_rtun_status_up(ubond_tunnel_t* t)
     while (!UBOND_TAILQ_EMPTY(&t->hpsbuf)) {
         ubond_pkt_release(UBOND_TAILQ_POP_LAST(&t->hpsbuf));
     }
+#if defined(MPTCP)
     mptcp_restart(EV_A);
+#endif
 }
 
 void ubond_rtun_status_down(ubond_tunnel_t* t)
@@ -1696,11 +1705,12 @@ ubond_rtun_resend(struct resend_data* d)
         uint16_t seqn = seqn_base + i;
         ubond_pkt_t* old_pkt = loss_tun->old_pkts[seqn % RESENDBUFSIZE];
         if (old_pkt && old_pkt->p.tun_seq == seqn) {
-            ubond_buffer_write(&hpsend_buffer, old_pkt);
-            loss_tun->old_pkts[seqn % RESENDBUFSIZE] = NULL; // remove this from the old list
-            if (old_pkt->p.type == UBOND_PKT_DATA)
+            if (old_pkt->p.type == UBOND_PKT_DATA) {
+                ubond_buffer_write(&hpsend_buffer, old_pkt);
+                loss_tun->old_pkts[seqn % RESENDBUFSIZE] = NULL; // remove this from the old list
                 old_pkt->p.type = UBOND_PKT_DATA_RESEND;
-            log_debug("resend", "resend packet (tun seq: 0x%x) previously sent on %s", seqn, loss_tun->name);
+                log_debug("resend", "resend packet (tun seq: 0x%x) previously sent on %s", seqn, loss_tun->name);
+            }
         } else {
             if (old_pkt) {
                 log_debug("resend", "unable to resend seq 0x%x (Not Found - replaced by 0x%x)", seqn, old_pkt->p.tun_seq);
@@ -1877,7 +1887,8 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
     }
 
     if (min_srtt > 0 && max_srtt > 0 && min_bw_in > 0 && max_bw_in > 0) {
-        max_size_outoforder = (max_srtt / min_srtt) * (max_bw_in / min_bw_in);
+        max_size_outoforder = ((max_size_outoforder*9.0) + 
+        ((max_srtt / min_srtt) * (max_bw_in / min_bw_in)))/10.0;
         srtt_max = max_srtt;
     }
 
@@ -1972,7 +1983,10 @@ ubond_rtun_check_lossy(ubond_tunnel_t* tun)
     double loss = tun->sent_loss;
     int status_changed = 0;
     ev_tstamp now = ev_now(EV_A);
-    int keepalive_ok = ((tun->last_activity == 0) || (tun->last_activity + (UBOND_IO_TIMEOUT_DEFAULT * 5) + ((tun->srtt_av / 1000.0) * 2)) > now);
+    int keepalive_ok = ((tun->last_activity == 0)
+                || ((tun->last_activity + (UBOND_IO_TIMEOUT_DEFAULT * 5) + ((tun->srtt_av / 1000.0) * 2)) > now)
+                || ev_is_pending(&tun->io_read));
+
 
     if (!keepalive_ok && tun->status == UBOND_AUTHOK) {
         log_info("rtt", "%s keepalive reached threashold, last activity recieved %fs ago", tun->name, now - tun->last_activity);
@@ -2028,7 +2042,10 @@ ubond_rtun_check_timeout(EV_P_ ev_timer* w, int revents)
     ubond_rtun_check_lossy(t);
 
     if (t->status == UBOND_LOSSY) {
-        if ((t->last_activity != 0) && (t->last_activity + t->timeout + (UBOND_IO_TIMEOUT_DEFAULT * 2) + ((t->srtt_av / 1000.0) * 2)) < now) {
+        if ((t->last_activity != 0)
+        && ((t->last_activity + t->timeout + (UBOND_IO_TIMEOUT_DEFAULT * 10) + ((t->srtt_av / 1000.0) * 2)) < now)
+        && (ev_is_pending(&t->io_read)==0))
+        {
             log_info("protocol", "%s timeout", t->name);
             ubond_rtun_status_down(t);
         }
@@ -2067,16 +2084,24 @@ tuntap_io_event(EV_P_ ev_io* w, int revents)
 #endif
             //            pkt->stream = NULL;
             //pkt->sent_tun = NULL;
-            pkt->p.data_seq = next_data_seq(); // this is normal data, not tcp data
+            pkt->p.data_seq = next_data_seq(pkt); // this is normal data, not tcp data
             ubond_buffer_write(&send_buffer, pkt);
             ubond_tunnel_t* t;
             // ev_now_update(EV_A);
-            LIST_FOREACH(t, &rtuns, entries)
-            {
-                if (!t->busy_writing) {
-                    ubond_rtun_do_send(t, 0);
-                    if (UBOND_TAILQ_EMPTY(&send_buffer))
-                        break;
+            if (tunwaiting) {
+                if (!tunwaiting->busy_writing) {
+                    ubond_rtun_do_send(tunwaiting, 0);
+                }
+                tunwaiting = NULL;
+            }
+            if (UBOND_TAILQ_EMPTY(&send_buffer)) {
+                LIST_FOREACH(t, &rtuns, entries)
+                {
+                    if (!t->busy_writing) {
+                        ubond_rtun_do_send(t, 0);
+                        if (UBOND_TAILQ_EMPTY(&send_buffer))
+                            break;
+                    }
                 }
             }
         }

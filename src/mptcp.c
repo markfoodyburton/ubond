@@ -311,7 +311,7 @@ static void ubond_rtun_accept(EV_P_ ev_io* w, int revents)
         log_info("tcp", "TCP socket connection accepted (fd %d)", t->fd_tcp);
 
         log_warnx("tcp", "set mptcp options on fd %d", t->fd_tcp);
-        //        priv_set_mptcp(t->fd_tcp);
+//        priv_set_mptcp(&t->fd_tcp);
 
         ev_io_set(&t->io_tcp_read, t->fd_tcp, EV_READ);
         ev_io_start(EV_A_ & t->io_tcp_read);
@@ -335,6 +335,8 @@ ubond_rtun_start_tcp(EV_P_ ubond_mptcp_tunnel_t* mt)
                 return mptcp_socket_close(EV_A_ mt);
             }
             //    }
+            priv_set_mptcp(mt->fd_tcp_conn);
+
             if (ubond_rtun_bind(t, mt->fd_tcp_conn, SOCK_STREAM) < 0) {
                 return mptcp_socket_close(EV_A_ mt);
             }
@@ -387,6 +389,7 @@ ubond_rtun_start_tcp(EV_P_ ubond_mptcp_tunnel_t* mt)
 
 static void mptcp_socket_close(EV_P_ ubond_mptcp_tunnel_t* t)
 {
+    if (!t) return;
     log_warnx("tcp", "Closing TCP sockets");
 
     //    if (ev_is_active(&t->io_accept)) {
@@ -463,7 +466,7 @@ int print_mptcp_opts(int sockfd)
 int set_mptcp_options(int sockfd, int level)
 {
     log_warnx("tcp", "set mptcp options on fd %d", sockfd);
-    if (sockfd != 0 && level == IPPROTO_TCP) {
+    if (sockfd != 0&& level == IPPROTO_TCP) {
         int enable = 1;
         int ret = setsockopt(sockfd, level, MPTCP_ENABLED, &enable, sizeof(enable));
 
@@ -482,7 +485,7 @@ int set_mptcp_options(int sockfd, int level)
             return ret;
         }
 
-        char scheduler[] = "default";
+        char scheduler[] = "blest";
         ret = setsockopt(sockfd, level, MPTCP_SCHEDULER, scheduler, sizeof(scheduler));
 
         if (ret < 0) {
@@ -501,6 +504,5 @@ int set_mptcp_options(int sockfd, int level)
 
         return ret;
     }
-
     return 0;
 }

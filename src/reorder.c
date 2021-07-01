@@ -40,11 +40,14 @@
 
 #include "log.h"
 #include "pkt.h"
-#include "socks.h"
 #include "ubond.h"
 
-#define MAX_REORDERBUF ((uint32_t)10240)
-#define MIN_REORDERBUF ((uint32_t)0x20)
+//#define UDPONLY
+//#ifdef UDPONLY
+#include "socks.h"
+
+#define MAX_REORDERBUF ((uint32_t)2048)
+#define MIN_REORDERBUF ((uint32_t)5)
 
 #define REORDER_TIMEOUT 0.1
 /* The reorder buffer data structure itself */
@@ -57,33 +60,48 @@ struct ubond_reorder_buffer {
         REORDER_BUF_SYNCED } state;
 
     ev_tstamp last_delivery;
-
+    ev_tstamp last_received;
+    ev_tstamp av_diff;
     uint32_t data_seq;
 
     uint32_t start_seq;
+
+    ev_tstamp packets_start;
+    uint64_t packets_number;
+
     
-    uint64_t skipped;
-    uint64_t old;
-    uint64_t delivered;
-    uint64_t resends;
 };
 static struct ubond_reorder_buffer reorder_buffer;
 static ev_timer reorder_timeout_tick;
+static ev_timer reorder_timeout_data_tick;
+static ev_idle deliver_idle;
 extern void ubond_rtun_inject_tuntap(ubond_pkt_t* pkt);
 extern struct ev_loop* loop;
+int recvd=0;
 
 void ubond_reorder_enable()
 {
 }
 
+int tcp_reorder(ubond_pkt_t* pkt)
+{
+    if (((pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND) && pkt->p.data[9] == 6 && pkt->len != 66)) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
 extern float max_size_outoforder;
 uint32_t max_size()
 {
-    int s = max_size_outoforder * 10; // e.g. we consider re-orders up to 10 packets deep - way more than we need.
+    float s=0.1/(float)reorder_buffer.av_diff;
+//    int s = max_size_outoforder * 1; // e.g. we consider re-orders up to 100 packets deep - way more than we need.
     if (s < MIN_REORDERBUF)
         return MIN_REORDERBUF;
-    if (s > MAX_REORDERBUF/2)
-        return MAX_REORDERBUF/2;
+    if (s > MAX_REORDERBUF/8)
+        return MAX_REORDERBUF/8;
+
 
     return s;
 
@@ -103,43 +121,139 @@ inline static int32_t size()
     }
     return (int32_t)(reorder_buffer.head - reorder_buffer.next) + 1;
 }
+int ubond_reorder_length()
+{
+    return size();
+}
 void deliver()
 {
-    //    not draining ?
-    int i = 0;
-    
-    while (reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF] || size() >= max_size()) {
+    //if (!size()) return;
+
+    //ev_tstamp max=reorder_buffer.av_diff * MAX_REORDERBUF;
+    //ev_tstamp diff=ev_now(EV_DEFAULT_UC) - reorder_buffer.last_delivery;
+//if (size() >= max_size() ) {
+//log_debug("reorder_buffer", "Draining due to size %d %d", size(), max_size());
+//}
+
+    ev_tstamp now = ev_now(EV_DEFAULT_UC);
+    do {
+    //if (size() >= max_size() || ((now - reorder_buffer.last_delivery) > (reorder_buffer.av_diff * 1/*max_size()*/))) {
+        /* skip */
+        if (!size()) break;
+
+        int n=reorder_buffer.next;
+        while (reorder_buffer.buffer[n % MAX_REORDERBUF] == NULL) n++;
+        if ((size()>=max_size())
+//        || ((now - reorder_buffer.last_delivery) > (reorder_buffer.av_diff * 5)) ){
+      || (reorder_buffer.buffer[n % MAX_REORDERBUF]->timestamp < now-(reorder_buffer.av_diff * (max_size()/2)))) {
+            ubond_rtun_inject_tuntap(reorder_buffer.buffer[n % MAX_REORDERBUF]);
+            reorder_buffer.buffer[n % MAX_REORDERBUF] = NULL;
+            reorder_buffer.last_delivery = ev_now(EV_DEFAULT_UC);
+            reorder_buffer.next=n+1;
+        } else break;
+#if 0    
+        int i=0;
+        if (size() && reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF] == NULL) {
+            reorder_buffer.next++;
+//            reorder_flush();
+            log_debug("reorder_buffer", "timeout skipping unrecieved packets");
+            i++;
+        }
+    //}
+
+        if (size()>=max_size() || (size() &&
+            reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF]
+            && reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF]->timestamp < now-(reorder_buffer.av_diff * (max_size()))))
+        {
+            ubond_rtun_inject_tuntap(reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF]);
+            reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF] = NULL;
+            reorder_buffer.last_delivery = ev_now(EV_DEFAULT_UC);
+            reorder_buffer.next++;
+            i++;
+        }
+
+        if (!i) break;
+#endif
+    } while (size()>max_size());
+
+#if 0
+    int i=0;
+    while (size() && 
+    (reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF] || 
+    size() >= max_size() ||
+    (reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF] &&
+       reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF]->timestamp
+    )) {
         if (reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF]) {
             ubond_rtun_inject_tuntap(reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF]);
             i++;
-            reorder_buffer.delivered++;
             reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF] = NULL;
         } else {
-            reorder_buffer.skipped++;
             log_debug("reorder_buffer", "skipping unrecieved packet (buffer of %d packets, max size %d seq next=0x%x) srtt factor %f", size(), max_size(), reorder_buffer.next, max_size_outoforder);
         }
         reorder_buffer.next++;
+//        if (size() < max_size())
+            break;
     }
     if (i)
         reorder_buffer.last_delivery = ev_now(EV_DEFAULT_UC);
+#endif
+//    else 
+//    if (!size())
+//        ev_idle_stop(EV_A_ & deliver_idle);
+
+        //else log_warnx("reorder_buffer","blocked %d", size());
 }
+
+void ubond_reorder_deliver_idle(EV_P_ ev_idle* w, int revents)
+{
+    deliver();
+}
+
+int foo=0;
+void ubond_reorder_data_tick(EV_P_ ev_timer* w, int revents)
+{
+//    log_info("foo","timer %f %d ",reorder_buffer.av_diff, recvd);
+    if (recvd<10) return;
+    ev_tstamp diff = 0.1/(float)recvd;
+//    diff *= 0.9;
+    diff = ((reorder_buffer.av_diff * 99.0)+(double)diff)/100.0;
+        if (diff > 0.01) diff=0.01;
+    if (diff < 0.000001) { // enough for gigabit ethernet
+        diff=0.000001;
+    }
+
+    reorder_buffer.av_diff=diff;
+    reorder_timeout_tick.repeat = diff;
+if ((foo++ % 10) ==0)
+    log_info("foo","timer %f %d ",reorder_buffer.av_diff, recvd);
+    recvd=0;
+}
+
 void ubond_reorder_tick(EV_P_ ev_timer* w, int revents)
 {
     check_watcher(UBOND_REORDER_TICK);
+//    ev_idle_start(EV_A_ & deliver_idle);
+    return deliver();
+#if 0
     ev_tstamp now = ev_now(EV_DEFAULT_UC);
-    if (size() && ((now - reorder_buffer.last_delivery) > REORDER_TIMEOUT)) {
+    if (size() && ((now - reorder_buffer.last_delivery) > (reorder_buffer.av_diff * 10.0/*max_size()*/))) {
         /* skip */
         int i = 0;
         while (size() && reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF] == NULL) {
             reorder_buffer.next++;
             i++;
-            reorder_buffer.skipped++;
+//            break;
         }
-        log_debug("reorder_buffer", "timeout skipping %d unrecieved packets", i);
-        deliver();
+        if (i>0) {
+//            reorder_flush();
+            log_debug("reorder_buffer", "timeout skipping %d unrecieved packets", i);
+        }
     }
+    if (reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF]) ev_idle_start(EV_A_ & deliver_idle);
 
 //    printf("packets %d %d %d %d  %f\n", reorder_buffer.skipped, reorder_buffer.delivered, reorder_buffer.old, reorder_buffer.resends, max_size_outoforder);
+#endif
 }
 void ubond_reorder_reset()
 {
@@ -162,6 +276,9 @@ void ubond_reorder_reset()
     //reorder_buffer.last_delivery = 0;
 
     reorder_buffer.state = REORDER_BUF_RESET;
+    reorder_buffer.last_received=ev_now(EV_DEFAULT_UC);
+    reorder_buffer.last_delivery=ev_now(EV_DEFAULT_UC);
+    reorder_buffer.av_diff=0.25;
 }
 void ubond_reorder_init()
 {
@@ -169,19 +286,79 @@ void ubond_reorder_init()
     ubond_reorder_reset();
     ev_timer_init(&reorder_timeout_tick, &ubond_reorder_tick, 0.0, 0.25);
     ev_timer_start(EV_A_ & reorder_timeout_tick);
+//    ev_timer_init(&reorder_timeout_data_tick, &ubond_reorder_data_tick, 0.0, 0.1);
+//    ev_timer_start(EV_A_ & reorder_timeout_data_tick);
+    reorder_buffer.last_received=ev_now(EV_DEFAULT_UC);
+
+    ev_idle_init(&deliver_idle, ubond_reorder_deliver_idle);
+    ev_set_priority(&deliver_idle, 1); // higher priority that write, so dont get locked out, but allow reads to happen first.
+
 }
 
-uint32_t next_data_seq()
+uint32_t next_data_seq(ubond_pkt_t* pkt)
 {
+    if (!tcp_reorder(pkt)) return 0;
     uint32_t d = reorder_buffer.data_seq++;
     return d;
 }
 
 void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
+//    return ubond_rtun_inject_tuntap(pkt);
+    if (!tcp_reorder(pkt)) return ubond_rtun_inject_tuntap(pkt);
 //    if (pkt->p.flow_id) {
 //        fatalx("Can not re-order TCP stream");
 //    }
+recvd++;
+    ev_tstamp now=ev_now(EV_DEFAULT_UC);
+    pkt->timestamp=now;
+#if 0    
+    if (reorder_buffer.packets_number==10)
+    {
+        reorder_buffer.av_diff=(now - reorder_buffer.packets_start)/10;
+        log_warnx("foo","av diff %f", reorder_buffer.av_diff);
+        reorder_buffer.packets_number=0;
+    }
+    if (!reorder_buffer.packets_number) {
+        reorder_buffer.packets_start=now;
+    }
+    reorder_buffer.packets_number++;
+#endif    
+
+    ev_tstamp diff= now - reorder_buffer.last_received;
+//    diff *=0.9;
+
+
+    /* av diff tracks the FASTEST we receive packets */
+    if (diff < reorder_buffer.av_diff)// || size()==0)
+        diff=((reorder_buffer.av_diff*9.0)+diff)/10.0;
+    else {
+        if (size()<max_size()/2) {
+            diff=((reorder_buffer.av_diff*99.0)+diff)/100.0;
+        } else {
+            diff=((reorder_buffer.av_diff*9999.0)+diff)/10000.0;
+        }
+    }
+
+    if (diff > 0.01) diff=0.01;
+    if (diff < 0.000001) { // enough for gigabit ethernet
+        diff=0.000001;
+    }
+
+//        log_warnx("foo","min diff %f", diff);
+   reorder_buffer.av_diff=diff;
+//    if (size()<max_size()/4) {
+//        diff *= 20;
+//    }
+//    diff *= ((float)max_size() + ((float)size()*1.0) )/ ((float)size() *2.0);
+//    diff *= (float)max_size() / (float)size();
+//        if (diff > 0.01) diff=0.01;
+//    if (diff < 0.00001) { // enough for gigabit ethernet
+//        diff=0.00001;
+//    }
+    reorder_timeout_tick.repeat = diff;//reorder_buffer.av_diff;
+    reorder_buffer.last_received=now;
+
 
     if (reorder_buffer.state == REORDER_BUF_RESET) {
         reorder_buffer.next = reorder_buffer.head = pkt->p.data_seq;
@@ -196,12 +373,6 @@ void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
             log_warnx("reorder_buffer", "ERROR: head %d pkt %d size %d ahead %d",reorder_buffer.head, pkt->p.data_seq, size(), pkt->p.data_seq-reorder_buffer.head);
             //exit(-1);
         }
-//its because we got a 'reset' and we chose (randomly) the most 'backward' tunnel
-//so then the other tunnel is too far ahead, and boooom.
-// but we can ignore, it will only happen once on reset...
-
-//so, lte is falling behind, and it seems to go a loooong way behind - so far, things even wrap round...
-//we should consider any tunnel > e.g. 10x slower (too much?) down or lossy or some such
         if (reorder_buffer.buffer[pkt->p.data_seq % MAX_REORDERBUF]) {
             if ((pkt->p.type == UBOND_PKT_DATA_RESEND) && reorder_buffer.buffer[pkt->p.data_seq % MAX_REORDERBUF]->p.data_seq == pkt->p.data_seq) {
                 log_debug("reorder_buffer", "redundent resend %d", size());
@@ -218,17 +389,17 @@ void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
             reorder_buffer.head = pkt->p.data_seq;
         }
         if (pkt->p.type == UBOND_PKT_DATA_RESEND) {
-            reorder_buffer.resends++;
+            log_debug("resend", "Injected resent packet (id 0x%x current size %d next id 0x%x)", pkt->p.data_seq, size(), reorder_buffer.next);
         }
         reorder_buffer.buffer[pkt->p.data_seq % MAX_REORDERBUF] = pkt;
     } else {
-        reorder_buffer.old++;
-        ubond_pkt_release(pkt); // we have already got this packet!
-//        tun->loss++;
-//      setting loss to e.g. 100 is a bit evil, but seems to work !
-
-        log_debug("reorder_buffer", "REJECT PACKET 0x%x from %s (current next 0x%x current head 0x%x max size %d", pkt->p.data_seq, tun->name, reorder_buffer.next, reorder_buffer.head, max_size());
-
+//        if (pkt->p.type == UBOND_PKT_DATA_RESEND) {
+//            ubond_pkt_release(pkt);
+//            log_debug("resend", "REJECT resent packet (id 0x%x current size %d next id 0x%x)", pkt->p.data_seq, size(), reorder_buffer.next);
+//        } else {
+            ubond_rtun_inject_tuntap(pkt);
+            log_debug("reorder_buffer", "LATE PACKET 0x%x from %s (current next 0x%x current head 0x%x max size %d", pkt->p.data_seq, tun->name, reorder_buffer.next, reorder_buffer.head, max_size());
+//        }
     }
 #if 0
     if ((int32_t)(pkt->p.data_seq - (reorder_buffer.head) > 0) 
@@ -264,19 +435,36 @@ void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
         }
     }
 #endif
-    deliver();
+    if (size() >= max_size()) {
+        deliver();
+    }
+
+//    if (reorder_buffer.buffer[reorder_buffer.next % MAX_REORDERBUF]) 
+//        ev_idle_start(EV_A_ & deliver_idle);
 }
 
+
+
+
+
 #if 0
+// full TCP version
+
+
+
+
+
 /* The reorder buffer data structure itself */
 struct ubond_reorder_buffer {
-    uint64_t min_seqn; /**< Lowest seq. number that can be in the buffer */
+    uint32_t min_seqn; /**< Lowest seq. number that can be in the buffer */
     int is_initialized;
     int enabled;
     int list_size;
     int list_size_max; // used to report only
     uint64_t loss;
     uint64_t delivered;
+
+    uint32_t data_seq;
 
     ev_tstamp last_tick;
     uint64_t pkts_arrived;
@@ -291,25 +479,39 @@ struct ubond_reorder_buffer {
 
     ev_check reorder_drain_check;
 };
-static struct ubond_reorder_buffer* reorder_buffer;
+static struct ubond_reorder_buffer* reorder_buffer=NULL;
 //static ev_timer reorder_drain_check;
 extern void ubond_rtun_inject_tuntap(ubond_pkt_t* pkt);
 extern struct ev_loop* loop;
 static ev_timer reorder_timeout_tick;
 extern uint64_t out_resends;
-extern ev_tstamp resend_at;
+ev_tstamp resend_at;
 extern ubond_pkt_list_t send_buffer; /* send buffer */
+extern LIST_HEAD(rtunhead, ubond_tunnel_s) rtuns;
 void ubond_reorder_reset();
 
 void ubond_reorder_drain();
 
-int aolderb(uint64_t a, uint64_t b)
+int tcp_reorder(ubond_pkt_t* pkt)
 {
-    return ((int64_t)(b - a)) > 0;
+    if (((pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND) && pkt->p.data[9] == 6)) {
+        return 1;
+    } else {
+        return 0;
+    }
 }
-int aoldereqb(uint64_t a, uint64_t b)
+uint32_t next_data_seq(ubond_pkt_t* pkt)
 {
-    return ((int64_t)(b - a)) >= 0;
+    uint32_t d = reorder_buffer->data_seq++;
+    return d;
+}
+int aolderb(uint32_t a, uint32_t b)
+{
+    return ((int32_t)(b - a)) > 0;
+}
+int aoldereqb(uint32_t a, uint32_t b)
+{
+    return ((int32_t)(b - a)) >= 0;
 }
 
 int ubond_reorder_length()
@@ -415,6 +617,7 @@ void ubond_reorder_init()
     UBOND_TAILQ_INIT(&reorder_buffer->list);
     reorder_buffer->enabled = 0;
     ubond_reorder_reset();
+    reorder_buffer->data_seq=0;
 
     ev_check_init(&reorder_buffer->reorder_drain_check, ubond_reorder_drain_check);
 
@@ -446,31 +649,27 @@ void ubond_reorder_enable()
     reorder_buffer->enabled = 1;
 }
 
-wouldnt this be better as just a e.g .1024 array - if you hit within the last 1024, great, if not forget it equally - keep track of which tunnels have new thing, when all tunnels have at least e.g .2, then we can be sure its a loss, and we should just move on.
-
-                                                                                                                                                                                                                                             extern int
-                                                                                                                                                                                                                                             is_tcp(ubond_pkt_t*pkt);
 void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
     struct ubond_reorder_buffer* b = reorder_buffer;
     b->pkts_arrived++;
 
-    if (is_tcp(pkt) && (!b->is_initialized || ((int64_t)(b->min_seqn - pkt->p.data_seq) > 1000 && pkt->p.data_seq < 1000))) {
+    if (tcp_reorder(pkt) && (!b->is_initialized || ((int32_t)(b->min_seqn - pkt->p.data_seq) > 1000 && pkt->p.data_seq < 1000))) {
         b->min_seqn = pkt->p.data_seq;
         b->is_initialized = 1;
-        log_warnx("reorder", "initial sequence: %" PRIu64 "", pkt->p.data_seq);
+        log_warnx("reorder", "initial sequence: %" PRIu32 "", pkt->p.data_seq);
     }
 
     if (pkt->p.type == UBOND_PKT_DATA_RESEND) {
         // we could count in each tunnel the number of non resends, if you get to
         // 'reorder' in each tunnel, you know you wont receive anymore resends
+        resend_at = ev_now(EV_DEFAULT_UC);
         if (out_resends > 0)
             out_resends--;
     }
 
-    if (!b->enabled || !is_tcp(pkt) || !pkt->p.data_seq /* || pkt->p.data_seq==b->min_seqn*/) {
-        if (!ubond_stream_write(pkt))
-            ubond_rtun_inject_tuntap(pkt); // this will deliver and free the packet
+    if (!b->enabled || !tcp_reorder(pkt) || !pkt->p.data_seq /* || pkt->p.data_seq==b->min_seqn*/) {
+        ubond_rtun_inject_tuntap(pkt); // this will deliver and free the packet
         // Deliver non reordable packets ASAP, as that shoudn't effect a tcp algorithm
         b->delivered++;
         return;
@@ -534,7 +733,7 @@ void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
     //  ubond_reorder_drain();
 }
 
-extern double srtt_min;
+extern double min_srtt;
 void ubond_reorder_drain()
 {
     struct ubond_reorder_buffer* b = reorder_buffer;
@@ -546,17 +745,15 @@ void ubond_reorder_drain()
     then - lest say we wnt to be able to handle 50 errors
     so - 50* the delay it takes to send - say 10 per?
     then -the other end - another 150 + another 50* - so everything *2
-
     ((150 + 50*10)*2)*2 = 2.6
     + the SRTT
-
     thats how many we want IN THE QUEUE
     so if we're /2, then we have to *2....*/
 
     ev_tstamp now = ev_now(EV_DEFAULT_UC);
-    ev_tstamp t = ((/*(double)b->*/ srtt_min * 3 / 1000.0) * 2.2); //+2.6; // +300ms processing time
+    ev_tstamp t = ((/*(double)b->*/ min_srtt * 3 / 1000.0) * 2.2); //+2.6; // +300ms processing time
 
-    if (resend_at < (now - (2.2 * (/*(double)b->*/ srtt_min * 3 / 1000.0)))) {
+    if (resend_at < (now - (2.2 * (/*(double)b->*/ min_srtt * 3 / 1000.0)))) {
         // we're never going to get a resend, you may as well drop!
     } else {
         t += 2.6;
@@ -579,12 +776,10 @@ void ubond_reorder_drain()
     Packets that are 'before' the current 'minium' - drop
     Packets that are 'after' the current 'minimum' hold - till the cut-off time,
       then deliver
-
   We would love a list that was equal to the number of things we need such
   that (max_srtt*2 + processing, + other things in the resend queue) time can
   pass, and we'll still be able to fill in wih resends...
   Lets call that max_srtt*6.6 (as above)
-
   But, no point having a length greater than  we could be asking for
   (e.g. that could be found in the pkt list)
 */
@@ -601,8 +796,7 @@ void ubond_reorder_drain()
         drain_cnt++;
 
         if (l->p.data_seq == b->min_seqn) { // normal delivery
-            if (!ubond_stream_write(l))
-                ubond_rtun_inject_tuntap(l);
+            ubond_rtun_inject_tuntap(l);
             b->delivered++;
             log_debug("reorder", "Delivered data seq %lu (tun seq %lu)", l->p.data_seq, l->p.tun_seq);
             b->min_seqn = l->p.data_seq + 1;

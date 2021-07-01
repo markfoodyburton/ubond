@@ -410,8 +410,7 @@ void ubond_control_write_status(struct ubond_control *ctrl)
         tuntap.type == UBOND_TUNTAPMODE_TUN ? "tun" : "tap",
         tuntap.devname,
         bandwidth,
-//                   (double) UBOND_TAILQ_LENGTH(&send_buffer),
-        1,//ubond_reorder_length(),
+        ubond_reorder_length(),
         1.0,//ubond_total_loss(),
         pool_out
     );
