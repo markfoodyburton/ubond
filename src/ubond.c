@@ -610,7 +610,7 @@ ubond_rtun_read(EV_P_ ev_io* w, int reavents)
     betoh_proto(&(pkt->p));
 
     pkt->len = len; // stamp the wire length
-    tun->pkts_cnt++;
+//    tun->pkts_cnt++;
     tun->recvbytes += len;
     tun->recvpackets += 1;
     tun->bm_data += len;
@@ -1003,7 +1003,7 @@ ubond_rtun_new(const char* name,
     new->srtt_d = 0;
     new->srtt_c = 0;
     new->srtt_min = 0;
-    new->srtt_reductions = 0;
+    //new->srtt_reductions = 0;
     new->seq_last = 0;
     new->seq_vect = (uint64_t)-1;
     new->reorder_length = 2;
@@ -1150,14 +1150,14 @@ ubond_rtun_recalc_weight()
                     part = 1.0 - (((double)t->sent_loss - lt) / lt);
                     if (part <= 0.2) {
                         part = 0.2;
-                        t->srtt_reductions++;
+//                        t->srtt_reductions++;
                     }
                 }
                 // 0 is too little - 3 is too much!
                 // NB, this doesn't really 'slow' traffic on the poor link, that will
                 // slow anyway - this sets up so that other links will get more!
-                if (t->srtt > t->srtt_min * 2) {
-                    part *= (t->srtt_min * 2) / t->srtt;
+                if (t->srtt > t->srtt_min * 3) {
+                    part *= (t->srtt_min * 3) / t->srtt;
                     if (part <= 0.2)
                         part = 0.2;
                 }
@@ -1709,13 +1709,13 @@ ubond_rtun_resend(struct resend_data* d)
                 ubond_buffer_write(&hpsend_buffer, old_pkt);
                 loss_tun->old_pkts[seqn % RESENDBUFSIZE] = NULL; // remove this from the old list
                 old_pkt->p.type = UBOND_PKT_DATA_RESEND;
-                log_debug("resend", "resend packet (tun seq: 0x%x) previously sent on %s", seqn, loss_tun->name);
+                log_debug("resendx", "resend packet (tun seq: 0x%x) previously sent on %s", seqn, loss_tun->name);
             }
         } else {
             if (old_pkt) {
-                log_debug("resend", "unable to resend seq 0x%x (Not Found - replaced by 0x%x)", seqn, old_pkt->p.tun_seq);
+                log_debug("resendx", "unable to resend seq 0x%x (Not Found - replaced by 0x%x)", seqn, old_pkt->p.tun_seq);
             } else {
-                log_debug("resend", "unable to resend seq 0x%x (Not Found - empty slot)", seqn);
+                log_debug("resendx", "unable to resend seq 0x%x (Not Found - empty slot)", seqn);
             }
         }
     }
@@ -1810,11 +1810,11 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
 
             double bandwidth_sent = ((t->bytes_since_adjust / 128.0) / diff);
 
-            double reductions = ((double)t->srtt_reductions / (double)t->pkts_cnt) * 100.0;
-            if (t->pkts_cnt < 10)
-                reductions = 0;
-
-            t->pkts_cnt = 0;
+//            double reductions = ((double)t->srtt_reductions / (double)t->pkts_cnt) * 100.0;
+//            if (t->pkts_cnt < 10)
+//                reductions = 0;
+//
+//            t->pkts_cnt = 0;
 
             /*
       would have to delay it by srtt?
@@ -1873,9 +1873,9 @@ void ubond_calc_bandwidth(EV_P_ ev_timer* w, int revents)
                     }
                     t->bandwidth_max = new_bwm;
                 } else {
-                    if (reductions > 50) { // more than 50% reductions, we should reduce bandwidth
-                        t->bandwidth_max *= 0.99;
-                    }
+//                    if (reductions > 50) { // more than 50% reductions, we should reduce bandwidth
+//                        t->bandwidth_max *= 0.99;
+//                    }
                     if (t->bandwidth_max < 100)
                         t->bandwidth_max = 100;
                     t->lossless = 0;

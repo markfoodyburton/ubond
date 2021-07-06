@@ -85,7 +85,7 @@ void ubond_reorder_enable()
 
 int tcp_reorder(ubond_pkt_t* pkt)
 {
-    if (((pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND) && pkt->p.data[9] == 6 && pkt->len != 66)) {
+    if (((pkt->p.type == UBOND_PKT_DATA || pkt->p.type == UBOND_PKT_DATA_RESEND) && pkt->p.data[9] == 6 /*&& pkt->len != 66*/)) {
         return 1;
     } else {
         return 0;
@@ -96,11 +96,11 @@ extern float max_size_outoforder;
 uint32_t max_size()
 {
     float s=0.1/(float)reorder_buffer.av_diff;
-//    int s = max_size_outoforder * 1; // e.g. we consider re-orders up to 100 packets deep - way more than we need.
+//    int s = max_size_outoforder * 10; // e.g. we consider re-orders up to 10 packets deep - way more than we need.
     if (s < MIN_REORDERBUF)
         return MIN_REORDERBUF;
-    if (s > MAX_REORDERBUF/8)
-        return MAX_REORDERBUF/8;
+    if (s > MAX_REORDERBUF/2)
+        return MAX_REORDERBUF/2;
 
 
     return s;
@@ -125,6 +125,7 @@ int ubond_reorder_length()
 {
     return size();
 }
+extern float srtt_max;
 void deliver()
 {
     //if (!size()) return;
@@ -144,8 +145,10 @@ void deliver()
         int n=reorder_buffer.next;
         while (reorder_buffer.buffer[n % MAX_REORDERBUF] == NULL) n++;
         if ((size()>=max_size())
+        || (n==reorder_buffer.next)// && (reorder_buffer.buffer[n % MAX_REORDERBUF]->timestamp < now-(srtt_max/1000.0)))
 //        || ((now - reorder_buffer.last_delivery) > (reorder_buffer.av_diff * 5)) ){
-      || (reorder_buffer.buffer[n % MAX_REORDERBUF]->timestamp < now-(reorder_buffer.av_diff * (max_size()/2)))) {
+    /* allow for 2 roundtrips? */
+      || (reorder_buffer.buffer[n % MAX_REORDERBUF]->timestamp < now-(srtt_max/300.0))){//(reorder_buffer.av_diff * (max_size())))) {
             ubond_rtun_inject_tuntap(reorder_buffer.buffer[n % MAX_REORDERBUF]);
             reorder_buffer.buffer[n % MAX_REORDERBUF] = NULL;
             reorder_buffer.last_delivery = ev_now(EV_DEFAULT_UC);
@@ -305,6 +308,7 @@ uint32_t next_data_seq(ubond_pkt_t* pkt)
 void ubond_reorder_insert(ubond_tunnel_t* tun, ubond_pkt_t* pkt)
 {
 //    return ubond_rtun_inject_tuntap(pkt);
+    if (!pkt->p.data_seq)  return ubond_rtun_inject_tuntap(pkt);
     if (!tcp_reorder(pkt)) return ubond_rtun_inject_tuntap(pkt);
 //    if (pkt->p.flow_id) {
 //        fatalx("Can not re-order TCP stream");
@@ -397,8 +401,9 @@ recvd++;
 //            ubond_pkt_release(pkt);
 //            log_debug("resend", "REJECT resent packet (id 0x%x current size %d next id 0x%x)", pkt->p.data_seq, size(), reorder_buffer.next);
 //        } else {
-            ubond_rtun_inject_tuntap(pkt);
-            log_debug("reorder_buffer", "LATE PACKET 0x%x from %s (current next 0x%x current head 0x%x max size %d", pkt->p.data_seq, tun->name, reorder_buffer.next, reorder_buffer.head, max_size());
+//            ubond_rtun_inject_tuntap(pkt);
+            ubond_pkt_release(pkt);
+            log_debug("reorder_buffer", "LATE PACKET 0x%x from %s by %d (current next 0x%x current head 0x%x max size %d", pkt->p.data_seq, tun->name, reorder_buffer.head - pkt->p.data_seq, reorder_buffer.next, reorder_buffer.head, max_size());
 //        }
     }
 #if 0

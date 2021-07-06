@@ -156,7 +156,7 @@ typedef struct ubond_tunnel_s {
     int server_mode; /* server or client */
     int disconnects; /* is it stable ? */
     int fallback_only; /* if set, this link will be used when all others are down */
-    uint64_t pkts_cnt;
+    //uint64_t pkts_cnt;
     uint8_t sent_loss; /* loss as reported by far end */
     int loss; /* our average loss must be less than 256!*/
     int loss_d;
@@ -172,7 +172,7 @@ typedef struct ubond_tunnel_s {
     double srtt_d;
     double srtt_c;
     double srtt_min;
-    double srtt_reductions;
+    //double srtt_reductions;
     double weight; /* For weight round robin */
     uint32_t flow_id;
     uint64_t sentpackets; /* 64bit packets sent counter */
