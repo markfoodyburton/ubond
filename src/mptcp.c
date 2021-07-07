@@ -139,7 +139,7 @@ static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents)
             }
         }
         if (pkt->len == pkt->p.len) {
-            log_debug("tcp", "< TCP recieved from mptcp %ld bytes (fd:%d)",
+            log_debug("tcp", "< TCP recieved from mptcp %d bytes (fd:%d)",
                 pkt->len, tun->fd_tcp);
             if (ubond_mptcp_check_auth(EV_A_ tun, pkt)) {
                 ubond_rtun_inject_tuntap(pkt);
@@ -425,10 +425,10 @@ ubond_rtun_check_tcp_timeout(EV_P_ ev_timer* w, int revents)
     //priv_print_mptcp(t->fd_tcp);
     //print_mptcp_opts(t->fd_tcp);
 }
-
 int print_mptcp_opts(int sockfd)
 {
-
+    // enable for debug printing
+#if 0
     log_warnx("tcp", "tcp fd %d", sockfd);
     struct mptcp_info minfo;
     struct mptcp_meta_info meta_info;
@@ -458,12 +458,20 @@ int print_mptcp_opts(int sockfd)
             log_warnx("tcp", "bytes:%d/%d\tuna:%d\trtt:%d\tAddr:%s", others[i].tcpi_bytes_sent, others[i].tcpi_bytes_received, others[i].tcpi_unacked, others[i].tcpi_rtt, inet_ntoa(others_info[i].src_v4.sin_addr));
         }
     }
+#endif
 }
 
+
+// comment out this line if you dont want ubond to set up the socket for you
+#define MPTCP_SOCK_SETUP
+#ifdef IPPROTO_MPTCP
+#undef MPTCP_SOCK_SETUP
+#endif
 int set_mptcp_options(int sockfd, int level)
 {
     log_warnx("tcp", "set mptcp options on fd %d", sockfd);
     if (sockfd != 0 && level == IPPROTO_TCP) {
+#ifdef MPTCP_SOCK_SETUP
         int enable = 1;
         int ret = setsockopt(sockfd, level, MPTCP_ENABLED, &enable, sizeof(enable));
 
@@ -500,6 +508,7 @@ int set_mptcp_options(int sockfd, int level)
         }
 
         return ret;
+#endif
     }
 
     return 0;

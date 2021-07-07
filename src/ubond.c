@@ -1273,9 +1273,13 @@ int ubond_rtun_start_socket(ubond_tunnel_t* t, int socktype)
             t->name, addr, port, gai_strerror(ret));
         return -1;
     }
-
     res = t->addrinfo;
     while (res) {
+#ifdef IPPROTO_MPTCP
+        if (t->addrinfo->ai_socktype==SOCK_STREAM) {
+            t->addrinfo->ai_protocol=IPPROTO_MPTCP;   // enable mptcpv1
+        }
+#endif
         /* creation de la socket(2) */
         if ((fd = socket(t->addrinfo->ai_family,
                  t->addrinfo->ai_socktype,
