@@ -2372,6 +2372,7 @@ int main(int argc, char** argv)
         ubond_pkt_list_init(&incomming, PKTBUFSIZE);
         ubond_pkt_list_init(&mptcp_buffer, PKTBUFSIZE);
     }
+    mptcp_init(EV_A);
 
     if (ubond_tuntap_alloc(&tuntap) <= 0)
         fatalx("cannot create tunnel device");

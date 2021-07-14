@@ -13,9 +13,21 @@ static void ubond_tcp_r_check(EV_P_ ev_check* w, int revents);
 static void ubond_tcp_w_check(EV_P_ ev_check* w, int revents);
 static void mptcp_socket_close(EV_P_ ubond_mptcp_tunnel_t* t);
 static void mptcp_socket_reconnect(EV_P_ ubond_mptcp_tunnel_t* t);
-
+static void mptcp_timer_send_tuntap(EV_P_ ev_timer *w, int revents);
 ubond_pkt_list_t mptcp_buffer;
 ubond_mptcp_tunnel_t* mptun = NULL;
+ubond_pkt_list_t mptcp_out;
+ev_timer out_timer;
+ev_tstamp av_pks;
+ev_tstamp last_pks;
+
+void mptcp_init(EV_P)
+{
+    ubond_pkt_list_init(&mptcp_out, PKTBUFSIZE);        
+    ev_timer_init(&out_timer, mptcp_timer_send_tuntap, 0., 0.01);
+    last_pks=ev_now(EV_A);
+    av_pks=0.01;
+}
 
 void mptcp_restart(EV_P)
 {
@@ -60,9 +72,25 @@ void ubond_mptcp_rtun_new(EV_P_ ubond_tunnel_t* base)
     mptun = new;
 }
 
+static void mptcp_timer_send_tuntap(EV_P_ ev_timer *w, int revents)
+{
+    if (!UBOND_TAILQ_EMPTY(&mptcp_out)) {
+        ubond_pkt_t* pkt = UBOND_TAILQ_POP_LAST(&mptcp_out);
+        ubond_rtun_inject_tuntap(pkt);
+        out_timer.repeat = av_pks;
+        if (mptcp_out.length > PKTBUFSIZE) {
+            ev_invoke(EV_A_ & out_timer, revents);
+        }
+    } else {
+        ev_timer_stop(EV_A_ &out_timer);
+    }
+}
+
 /* TCP read */
 static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents)
 {
+    ev_tstamp now = ev_now(EV_A);
+
     check_watcher(UBOND_RTUN_TCP_READ);
     ubond_mptcp_tunnel_t* tun = w->data;
     if (tun->fd_tcp < 0) {
@@ -142,7 +170,24 @@ static void ubond_rtun_tcp_read(EV_P_ ev_io* w, int revents)
             log_debug("tcp", "< TCP recieved from mptcp %d bytes (fd:%d)",
                 pkt->len, tun->fd_tcp);
             if (ubond_mptcp_check_auth(EV_A_ tun, pkt)) {
+               if (pkt->p.data[9] == 6 && pkt->len == 66) {
+                   ubond_rtun_inject_tuntap(pkt);
+               } else {
+
+#if NOSMOOTHING
+                UBOND_TAILQ_INSERT_HEAD(&mptcp_out, pkt);
+                ev_tstamp d=now-last_pks;
+                av_pks = ((av_pks * 999.0) + d)/1000.0;
+                av_pks *= 0.9;
+                if (av_pks < 0.00001) av_pks=0.00001;
+                if (av_pks > 0.01) av_pks=0.01;
+                last_pks = now;
+                if (!ev_is_active(&out_timer))
+                    ev_timer_start(EV_A_ &out_timer);
+#else
                 ubond_rtun_inject_tuntap(pkt);
+#endif
+               }
             } else {
                 ubond_pkt_release(pkt);
             }
