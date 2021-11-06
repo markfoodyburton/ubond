@@ -77,6 +77,8 @@
 #endif
 
 /* GLOBALS */
+struct rtunhead rtuns;
+
 struct tuntap_s tuntap;
 char* _progname;
 static char** saved_argv;
