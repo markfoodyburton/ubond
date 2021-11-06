@@ -130,7 +130,7 @@ enum chap_status {
     UBOND_LOSSY
 };
 
-LIST_HEAD(rtunhead, ubond_tunnel_s) rtuns;
+LIST_HEAD(rtunhead, ubond_tunnel_s);
 
 typedef struct ubond_tunnel_s
 {

@@ -74,7 +74,9 @@ extern struct ev_loop *loop;
 static ev_timer reorder_timeout_tick;
 extern uint64_t out_resends;
 extern ev_tstamp resend_at;
-extern ubond_pkt_list_t send_buffer;    /* send buffer */
+extern ubond_pkt_list_t send_buffer; /* send buffer */
+extern struct rtunhead rtuns;
+
 void ubond_reorder_reset();
 
 void ubond_reorder_drain();
