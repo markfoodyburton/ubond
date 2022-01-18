@@ -84,7 +84,7 @@ The **[general]** section is reserved for global configuration.
 
     **0** disables the reordering.
 
-  - _loss_tolerence_ = 0
+  - _loss_tolerance = 0
     ubond monitors packet loss on every link. If the packet loss
     ratio on a link exceeds the specified value in percent,
     the link changes state to UBOND_LOSSY and is removed from aggregation.
@@ -92,7 +92,7 @@ The **[general]** section is reserved for global configuration.
     Lossy links ARE used anyway if no other choices are available (if all links
     are lossy)
 
-    **100 or more** disables the loss tolerence system.
+    **100 or more** disables the loss tolerance system.
 
 
 ### TUNNELS
@@ -163,7 +163,7 @@ Status availables: **!**: down, **@**: up, **~**: lossy
 
 Example: `ubond: adsl3g !3g @adsl ~wifi`
 
-3g is **down**, adsl is **up** and wifi is **lossy** (up, but above loss_tolerence threshold).
+3g is **down**, adsl is **up** and wifi is **lossy** (up, but above loss_tolerance threshold).
 
 ## EXAMPLE
 

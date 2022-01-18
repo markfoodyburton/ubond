@@ -34,7 +34,7 @@ ubond.conf
     # configuration file provided with your distribution package.
     #
     reorder_buffer_size 64
-    loss_tolerence = 50
+    loss_tolerance = 50
 
     [filters]
     sdsl = udp port 5060

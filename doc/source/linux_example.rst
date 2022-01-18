@@ -326,7 +326,7 @@ Take a look at example config files for more details. (**man ubond.conf** can be
     timeout = 30
     password = "you have not changed me yet?"
     reorder_buffer_size = 64
-    loss_tolerence = 50
+    loss_tolerance= 50
 
     [filters]
 
@@ -401,7 +401,7 @@ ubond0.conf
     timeout = 30
     password = "pleasechangeme!"
     reorder_buffer_size = 64
-    loss_tolerence = 50
+    loss_tolerance = 50
 
     [filters]
 

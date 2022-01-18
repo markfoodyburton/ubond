@@ -102,13 +102,13 @@ Experiment to know what value is best for you\. Good starting point can be as sm
 \fB0\fR disables the reordering\.
 .
 .IP "\(bu" 4
-\fIloss_tolerence\fR = 0 ubond monitors packet loss on every link\. If the packet loss ratio on a link exceed the specified value in percent, the link changes state to UBOND_LOSSY and is removed from aggregation\.
+\fIloss_tolerance\fR = 0 ubond monitors packet loss on every link\. If the packet loss ratio on a link exceed the specified value in percent, the link changes state to UBOND_LOSSY and is removed from aggregation\.
 .
 .IP
 Lossy links ARE used anyway if no other choices are available (if all links are lossy)
 .
 .IP
-\fB100 or more\fR disables the loss tolerence system\.
+\fB100 or more\fR disables the loss tolerance system\.
 .
 .IP "" 0
 .
@@ -178,7 +178,7 @@ Status availables: \fB!\fR: down, \fB@\fR: up, \fB~\fR: lossy
 Example: \fBubond: adsl3g !3g @adsl ~wifi\fR
 .
 .P
-3g is \fBdown\fR, adsl is \fBup\fR and wifi is \fBlossy\fR (up, but above loss_tolerence threshold)\.
+3g is \fBdown\fR, adsl is \fBup\fR and wifi is \fBlossy\fR (up, but above loss_tolerance threshold)\.
 .
 .SH "EXAMPLE"
 See examples/ubond\.conf

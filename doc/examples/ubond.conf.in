@@ -65,11 +65,11 @@ cleartext_data = 0
 # reorder_buffer_size is 0 (disabled) by default.
 #reorder_buffer_size = 64
 
-# Loss tolerence
+# Loss tolerance
 # Defines the maximum loss ratio accepted before the link affected is being
 # considered too lossy and removed from agregation.
 # This value is expressed in percent.
-#loss_tolerence = 10
+#loss_tolerance = 10
 
 # Filtering system
 # when UBOND is configured to balance traffic across multiple links
@@ -106,7 +106,7 @@ bindport = 5080
 #remoteport = 5081
 # If it is a lossy link and we want to keep using it,
 # even if 30% of packets are lost
-#loss_tolerence = 30
+#loss_tolerance = 30
 #bandwidth_upload = 512000
 
 #[dsl2]

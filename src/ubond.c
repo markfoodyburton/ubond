@@ -541,7 +541,7 @@ int ubond_loss_pack(ubond_tunnel_t *t)
   // 50:50 current loss, and average loss as a %
   // or should we say current loss from 0-lt + average loss...?
 
-  // cut off at the loss tolerence
+  // cut off at the loss tolerance 
   if (ploss >= lt) return lt;
   int v=(int)(((ploss * lt)+(lt/2.0)-0.5) / lt);
   return v;
